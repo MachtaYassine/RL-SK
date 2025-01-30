@@ -1,0 +1,2 @@
+[console_scripts]
+skullking = SK.main:main
