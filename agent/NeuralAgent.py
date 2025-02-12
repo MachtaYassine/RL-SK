@@ -117,9 +117,6 @@ class LearningSkullKingAgent(SkullKingAgent):
             mask[effective_actions:] = -float('inf')
         masked_logits = logits + mask
         probs = F.softmax(masked_logits, dim=-1)
-        # NEW: check for invalid probabilities and replace with uniform distribution if needed
-        if torch.isnan(probs).any() or probs.sum() == 0:
-            probs = torch.ones_like(probs) / probs.shape[-1]
         m = torch.distributions.Categorical(probs)
         action = m.sample().item()
         log_prob = m.log_prob(torch.tensor(action))

@@ -62,12 +62,12 @@ class SkullKingEnvNoSpecials(gym.Env):
 
     def _get_observation(self):
         return {
-            "hand": self.hands[0],  # return as list
+            "hand": self.hands[self.current_player],  # changed from self.hands[0]
             "round_number": self.round_number,
             "bidding_phase": int(self.bidding_phase),
-            "tricks_won": self.tricks_won[0],
-            "current_trick": self.current_trick,  # return as list
-            "total_scores": self.total_scores     # NEW: include total scores in observation
+            "tricks_won": self.tricks_won[self.current_player],  # changed from self.tricks_won[0]
+            "current_trick": self.current_trick,
+            "total_scores": self.total_scores
         }
 
     def step(self, action):
