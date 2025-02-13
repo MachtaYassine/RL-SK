@@ -15,6 +15,7 @@ class SkullKingEnv(gym.Env):
         self.tricks_won = [0] * num_players
         self.current_trick = []
         self.bidding_phase = True
+        self.current_player = 0  # newly added for multi-agent symmetry
         
         # Observation space
         max_hand_size = 10  # Maximum cards in a hand (round 10)
@@ -50,36 +51,36 @@ class SkullKingEnv(gym.Env):
         self.tricks_won = [0] * self.num_players
         self.current_trick = []
         self.bidding_phase = True
+        self.current_player = 0  # newly added for multi-agent symmetry
         return self._get_observation()
 
     def _get_observation(self):
         return {
-            "hand": self.hands[0],  # return as list
+            "hand": self.hands[self.current_player],  # changed from self.hands[0]
             "round_number": self.round_number,
             "bidding_phase": int(self.bidding_phase),
-            "tricks_won": self.tricks_won[0],
-            "current_trick": self.current_trick  # return as list
+            "tricks_won": self.tricks_won[self.current_player],  # changed from self.tricks_won[0]
+            "current_trick": self.current_trick
         }
 
     def step(self, action):
         if self.bidding_phase:
-            self.bids[0] = action  # First player places bid
-            if all(b is not None for b in self.bids):  # If all players have bid
+            self.bids[self.current_player] = action  # use current_player instead of fixed index
+            self.current_player = (self.current_player + 1) % self.num_players
+            if all(b is not None for b in self.bids):
                 self.bidding_phase = False
-                self.action_space = spaces.Discrete(len(self.hands[0]))  # Now select card
+                self.action_space = spaces.Discrete(len(self.hands[self.current_player]))
             return self._get_observation(), 0, False, {}
-
         else:
-            played_card = self.hands[0].pop(action)  # Play selected card
+            played_card = self.hands[self.current_player].pop(action)
             self.current_trick.append(played_card)
-
-            if len(self.current_trick) == self.num_players:  # If trick is complete
+            if len(self.current_trick) == self.num_players:
                 winner = self.resolve_trick()
                 self.tricks_won[winner] += 1
                 self.current_trick = []
-
             done = self.round_number == self.max_rounds and all(len(h) == 0 for h in self.hands)
             reward = self.calculate_reward() if done else 0
+            self.current_player = (self.current_player + 1) % self.num_players
             return self._get_observation(), reward, done, {}
 
     def resolve_trick(self):

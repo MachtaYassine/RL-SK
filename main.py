@@ -10,6 +10,8 @@ import threading               # NEW: for running live server
 import http.server             # NEW: for live server
 import socketserver            # NEW: for live server
 from torch.utils.tensorboard import SummaryWriter  # NEW: for TensorBoard logging
+from env.SKEnvNoSpecials import SkullKingEnvNoSpecials
+from agent.HumanAgent import HumanAgent
 
 # Define a custom logger that accepts a "color" parameter, which can be a name.
 class CustomLogger(logging.Logger):
@@ -260,6 +262,53 @@ def main():
     plt.legend()
     plt.show()
     plt.savefig(f"{logs_dir}/policy_loss_curve.png")
+
+# NEW: Set learnable agents to evaluation mode
+    for agent in agents:
+        if hasattr(agent, 'bid_net'):
+            agent.bid_net.eval()
+            agent.play_net.eval()
+
+    # NEW: Launch an interactive game with a HumanAgent.
+    logger.info("Launching interactive play mode...", color="green")
+    # Prepare a new game with total players = trained agents + one human.
+    total_players = len(agents) + 1
+    game_env = SkullKingEnvNoSpecials(num_players=total_players)
+    # Copy existing trained agents then append the HumanAgent.
+    agents_with_human = agents.copy()
+    agents_with_human.append(HumanAgent(total_players))
+    
+    # Interactive game loop.
+    play = True
+    while play:
+        obs = game_env.reset()
+        done = False
+        logger.info("--- New Interactive Game Started ---", color="green")
+        phase='Bidding'
+        logger.info(f"Phase: {phase}", color="magenta")
+        while not done:
+            current_player = game_env.current_player
+            agent = agents_with_human[current_player]
+            if game_env.bidding_phase==0 and phase=='Bidding':
+                phase='Playing'
+                logger.info(f"Phase: {phase}", color="magenta")
+            elif game_env.bidding_phase==1 and phase=='Playing':
+                phase='Bidding'
+                logger.info(f"Phase: {phase}", color="magenta")
+            
+            logger.info(f"Interactive play: Player {current_player}'s turn.", color="cyan")
+            observation=game_env._get_observation()
+            if isinstance(agent, HumanAgent):
+                print(f"Observation: {observation}")
+
+            obs, reward, done, _ = game_env.step_with_agent(agent)
+            
+            if reward:
+                print(f"Reward: {reward}")
+        print(f"\nFinal Scores: {obs.get('total_scores', 'N/A')}")
+        play_again = input("Play again? (y/n): ")
+        if play_again.lower() != 'y':
+            play = False
 
 
 if __name__ == "__main__":

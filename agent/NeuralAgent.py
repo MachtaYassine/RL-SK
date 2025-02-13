@@ -29,21 +29,33 @@ class LearningSkullKingAgent(SkullKingAgent):
 
     # Each card now is encoded with 4 numbers (one-hot suit) and 1 for rank.
     def _bid_input_dim(self):
-        return self.hand_size * 5 + 2  # 5 features per card + round_number and tricks_won
+        # New dimension:
+        # hand encoding: hand_size * 5
+        # round_number, tricks_won, personal_bid: 3
+        # all_bids: num_players
+        # player_id: 1
+        # winning_card: 4 (one-hot) + 1 (rank) = 5
+        # current_winner: 1
+        return self.hand_size * 5 + 3 + self.num_players + 1 + 5 + 1  # = self.hand_size*5 + num_players + 10
 
     def _play_input_dim(self):
-        return self.hand_size * 5 + self.num_players * 5  # hand + current trick (5 features per card)
+        # New dimension:
+        # hand encoding: hand_size * 5
+        # current trick encoding: num_players * 5
+        # personal_bid, tricks_won: 2
+        # player_id: 1
+        # winning_card: 5
+        # current_winner: 1
+        return self.hand_size * 5 + self.num_players * 5 + 2 + 1 + 5 + 1  # = self.hand_size*5 + self.num_players*5 + 10
 
     def _process_bid_observation(self, observation):
-        # Process observation for bidding:
         suit_mapping = {"Parrot": 0, "Treasure Chest": 1, "Treasure Map": 2, "Jolly Roger": 3}
         hand = observation['hand']
         hand_vec = []
         for card in hand:
-            suit_str = card[0]
             one_hot = [0, 0, 0, 0]
-            if suit_str in suit_mapping:
-                one_hot[suit_mapping[suit_str]] = 1
+            if card[0] in suit_mapping:
+                one_hot[suit_mapping[card[0]]] = 1
             try:
                 rank = float(card[1])
             except (ValueError, TypeError):
@@ -53,19 +65,30 @@ class LearningSkullKingAgent(SkullKingAgent):
             hand_vec.extend([0] * 5)
         round_number = observation['round_number']
         tricks_won = observation['tricks_won']
-        input_vec = hand_vec + [round_number, tricks_won]
+        personal_bid = observation.get('personal_bid', 0)
+        all_bids = observation.get('all_bids', [0] * self.num_players)
+        player_id = observation.get('player_id', 0)
+        winning_card = observation['winning_card']  # Directly use winning_card
+        win_one_hot = [0, 0, 0, 0]
+        if winning_card[0] in suit_mapping:
+            win_one_hot[suit_mapping[winning_card[0]]] = 1
+        try:
+            win_rank = float(winning_card[1])
+        except (ValueError, TypeError):
+            win_rank = 0.0
+        current_winner = observation['current_winner']
+        input_vec = hand_vec + [round_number, tricks_won, personal_bid] + all_bids + [player_id] + win_one_hot + [win_rank] + [current_winner]
+        # print(input_vec)
         return torch.tensor(input_vec, dtype=torch.float32)
 
     def _process_play_observation(self, observation):
-        # Process observation for trick playing:
         suit_mapping = {"Parrot": 0, "Treasure Chest": 1, "Treasure Map": 2, "Jolly Roger": 3}
         hand = observation['hand']
         hand_vec = []
         for card in hand:
-            suit_str = card[0]
             one_hot = [0, 0, 0, 0]
-            if suit_str in suit_mapping:
-                one_hot[suit_mapping[suit_str]] = 1
+            if card[0] in suit_mapping:
+                one_hot[suit_mapping[card[0]]] = 1
             try:
                 rank = float(card[1])
             except (ValueError, TypeError):
@@ -76,11 +99,11 @@ class LearningSkullKingAgent(SkullKingAgent):
         current_trick = observation.get('current_trick', [])
         trick_vec = []
         for play in current_trick:
+            # Assuming play is a tuple: (player_id, card)
             _, card = play
-            suit_str = card[0]
             one_hot = [0, 0, 0, 0]
-            if suit_str in suit_mapping:
-                one_hot[suit_mapping[suit_str]] = 1
+            if card[0] in suit_mapping:
+                one_hot[suit_mapping[card[0]]] = 1
             try:
                 rank = float(card[1])
             except (ValueError, TypeError):
@@ -88,7 +111,20 @@ class LearningSkullKingAgent(SkullKingAgent):
             trick_vec.extend(one_hot + [rank])
         while len(trick_vec) < self.num_players * 5:
             trick_vec.extend([0] * 5)
-        input_vec = hand_vec + trick_vec
+        personal_bid = observation.get('personal_bid', 0)
+        tricks_won = observation.get('tricks_won', 0)
+        player_id = observation.get('player_id', 0)
+        winning_card = observation['winning_card']  # Directly use winning_card
+        win_one_hot = [0, 0, 0, 0]
+        if winning_card[0] in suit_mapping:
+            win_one_hot[suit_mapping[winning_card[0]]] = 1
+        try:
+            win_rank = float(winning_card[1])
+        except (ValueError, TypeError):
+            win_rank = 0.0
+        current_winner = observation['current_winner']
+        input_vec = hand_vec + trick_vec + [personal_bid, tricks_won, player_id] + win_one_hot + [win_rank] + [current_winner]
+        # print(input_vec)
         return torch.tensor(input_vec, dtype=torch.float32)
 
     def bid(self, observation):

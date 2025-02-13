@@ -1,7 +1,7 @@
 
 .pytest_cache/
 logs/
-
+tensorboard_logs/
 
 *.egg-info/
 *.pyc
