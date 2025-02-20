@@ -1,4 +1,4 @@
-from base_training import run_base_training
+from .base_training import run_base_training
 
 def run_sub_episode_training(args, env, agents, logger, writer=None):
     # Using a sub-episode manager to run training.
@@ -8,7 +8,7 @@ def run_sub_episode_training(args, env, agents, logger, writer=None):
     all_losses = [[] for _ in range(args.num_players)]
     for episode in range(args.num_episodes):
         logger.info(f"--- Sub-episode {episode+1} start ---", color="magenta")
-        loss = sub_manager.run_sub_episode()
+        loss = sub_manager.run_sub_episode(env)
         logger.info(f"Sub-episode {episode+1} complete, loss: {loss}", color="green")
         if writer:
             writer.add_scalar("Sub_Episode/Loss", loss, episode)

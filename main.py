@@ -116,16 +116,20 @@ def parse_args():
     parser.add_argument("--enable_tensorboard", action="store_true", help="Enable TensorBoard logging")  
     parser.add_argument("--shared_networks", action="store_true", help="Share policy networks among learning agents")
     parser.add_argument("--double_positive_rewards", action="store_true", help="Double positive rewards for learning agents")
-    parser.add_argument("--sub_episodes", action="store_true", help="Run sub-episodes instead of full games when using shared networks")
     parser.add_argument("--training_regimen", type=str, default="base", choices=["base", "sub_episode"],
                         help="Select training regimen: base or sub_episode")
+    # New flags for network architecture customization:
+    parser.add_argument("--bid_hidden_dims", nargs="+", type=int, default=[64, 64],
+                        help="Hidden dimensions for the bid network")
+    parser.add_argument("--play_hidden_dims", nargs="+", type=int, default=[64, 64],
+                        help="Hidden dimensions for the play network")
     return parser.parse_args()
 
 def setup_logger(logs_dir, debug):
     handler = logging.StreamHandler()
     formatter = ColoredFormatter("%(asctime)s - %(levelname)s - %(message)s", "%Y-%m-%d %H:%M:%S")
     handler.setFormatter(formatter)
-    plain_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s", "%Y-%m-%d %H:%M:%S")
+    plain_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s", "%Y-%m-%d M%H:%M:%S")
     details_handler = logging.FileHandler(f"{logs_dir}/details.log")
     details_handler.setLevel(logging.DEBUG)
     details_handler.setFormatter(plain_formatter)
@@ -145,42 +149,36 @@ def init_agents(args, logger):
         if agent_type not in AGENT_CLASSES:
             raise ValueError(f"Unknown agent type: {agent_type}")
         AgentClass = load_agent_class(AGENT_CLASSES[agent_type])
-        # Create a temporary environment to get dimension variables.
+        # Create a temporary environment to get dimension properties.
         temp_env = SkullKingEnvNoSpecials(num_players=args.num_players, logger=logger)
-        temp_obs = temp_env._get_observation()
-        suit_count = temp_obs["suit_count"]
-        max_rank = temp_obs["max_rank"]
-        max_players = temp_obs["max_players"]
-        hand_size = temp_obs["hand_size"]
-        bid_dimension_vars = temp_obs["bid_dimension_vars"]
-        play_dimension_vars = temp_obs["play_dimension_vars"]
-        fixed_bid_features = temp_obs["fixed_bid_features"]
-        fixed_play_features = temp_obs["fixed_play_features"]
+        temp_props = temp_env.get_env_properties()
+        suit_count = temp_props["suit_count"]
+        max_rank = temp_props["max_rank"]
+        max_players = temp_props["max_players"]
+        hand_size = temp_props["hand_size"]
+        bid_dimension_vars = temp_props["bid_dimension_vars"]
+        play_dimension_vars = temp_props["play_dimension_vars"]
+        fixed_bid_features = temp_props["fixed_bid_features"]
+        fixed_play_features = temp_props["fixed_play_features"]
+        bid_input_dim = hand_size * 5 + fixed_bid_features
+        play_input_dim = hand_size * 5 + fixed_play_features
         if agent_type == "learning" and args.shared_networks:
             if shared_bid_net is None:
-                bid_input_dim = hand_size * suit_count + (max_players + 4)
-                play_input_dim = hand_size * suit_count + 33
-                shared_bid_net = PolicyNetwork(bid_input_dim, output_dim=11)
-                shared_play_net = PolicyNetwork(play_input_dim, output_dim=args.hand_size)
-            agent = AgentClass(args.num_players, hand_size=args.hand_size, learning_rate=args.learning_rate,
+                shared_bid_net = PolicyNetwork(bid_input_dim, output_dim=11, hidden_dims=args.bid_hidden_dims)
+                shared_play_net = PolicyNetwork(play_input_dim, output_dim=hand_size, hidden_dims=args.play_hidden_dims)
+            agent = AgentClass(args.num_players, hand_size=hand_size, learning_rate=args.learning_rate,
                                shared_bid_net=shared_bid_net, shared_play_net=shared_play_net,
                                suit_count=suit_count, max_rank=max_rank, max_players=max_players,
                                bid_dimension_vars=bid_dimension_vars, play_dimension_vars=play_dimension_vars,
-                               fixed_bid_features=fixed_bid_features, fixed_play_features=fixed_play_features)
-        else:
-            agent = AgentClass(args.num_players, hand_size=args.hand_size, learning_rate=args.learning_rate,
+                               bid_hidden_dims=args.bid_hidden_dims, play_hidden_dims=args.play_hidden_dims)
+        elif agent_type == "learning":
+            agent = AgentClass(args.num_players, hand_size=hand_size, learning_rate=args.learning_rate,
                                suit_count=suit_count, max_rank=max_rank, max_players=max_players,
                                bid_dimension_vars=bid_dimension_vars, play_dimension_vars=play_dimension_vars,
-                               fixed_bid_features=fixed_bid_features, fixed_play_features=fixed_play_features)
+                               bid_hidden_dims=args.bid_hidden_dims, play_hidden_dims=args.play_hidden_dims)
+        else:
+            agent = AgentClass(args.num_players)
         agents.append(agent)
-    if args.shared_networks:
-        import torch.optim as optim
-        shared_optimizer_bid = optim.Adam(shared_bid_net.parameters(), lr=args.learning_rate)
-        shared_optimizer_play = optim.Adam(shared_play_net.parameters(), lr=args.learning_rate)
-        for agent in agents:
-            if hasattr(agent, "optimizer_bid"):
-                agent.optimizer_bid = shared_optimizer_bid
-                agent.optimizer_play = shared_optimizer_play
     return agents
 
 def run_training(args, env, agents, logger, writer):
@@ -191,7 +189,7 @@ def run_training(args, env, agents, logger, writer):
         from train.base_training import run_base_training
         return run_base_training(args, env, agents, logger, writer)
 
-def run_plots(logs_dir, agent_rewards, agent_losses, num_players):
+def run_plots(logs_dir, agent_rewards, loss_data, num_players):
     import matplotlib.pyplot as plt
     # Plot rewards
     plt.figure(figsize=(10,5))
@@ -199,25 +197,79 @@ def run_plots(logs_dir, agent_rewards, agent_losses, num_players):
         plt.plot(agent_rewards[i], label=f"Agent {i} Reward")
     # ...existing labels, title, legend...
     plt.savefig(f"{logs_dir}/training_curve.png")
-    # Plot losses
+    # Plot policy losses (if any)
+    # ...existing loss plots...
+    # NEW: Plot bid prediction loss over rounds.
+    _, bid_losses, play_head_losses = loss_data
     plt.figure(figsize=(10,5))
-    for i in range(num_players):
-        if any(x is not None for x in agent_losses[i]):
-            plt.plot([x for x in agent_losses[i] if x is not None], label=f"Agent {i} Loss")
-    # ...existing labels, title, legend...
-    plt.savefig(f"{logs_dir}/policy_loss_curve.png")
+    plt.plot(bid_losses, label="Bid Prediction Loss")
+    plt.xlabel("Round index")
+    plt.ylabel("Loss")
+    plt.title("Bid Network Loss per Round")
+    plt.legend()
+    plt.savefig(f"{logs_dir}/bid_loss_curve.png")
+    # NEW: Plot play network prediction (trick win) loss over rounds.
+    plt.figure(figsize=(10,5))
+    plt.plot(play_head_losses, label="Play Head Loss")
+    plt.xlabel("Round index")
+    plt.ylabel("Loss")
+    plt.title("Play Network (Second Head) Loss per Round")
+    plt.legend()
+    plt.savefig(f"{logs_dir}/play_head_loss_curve.png")
+    # Plot losses accumulated per agent if desired.
+    # ...existing code...
 
 def run_interactive(args, agents, logger):
     from env.SKEnvNoSpecials import SkullKingEnvNoSpecials
     from agent.HumanAgent import HumanAgent
-    total_players = len(agents) + 1
-    # ...existing interactive-play setup...
-    # Minimal functional loop for interactive play:
-    while True:
-        # ...interactive game loop code...
-        play_again = input("Play again? (y/n): ")
-        if play_again.lower() != 'y':
-            break
+    logger.info("Appending Human Agent as the last player.", color="cyan")
+    agents.append(HumanAgent(len(agents) + 1))
+    total_players = len(agents)
+    env = SkullKingEnvNoSpecials(num_players=total_players, logger=logger)
+    # NEW: Enable rotation of starting player during interactive play.
+    env.player_0_always_starts = False
+    done = False
+    obs = env.reset()
+    while not done:
+        current_player = env.current_player
+        current_agent = agents[current_player]
+        print(f"\n--- Player {current_player}'s turn ---")
+        if isinstance(current_agent, HumanAgent):
+            print("Your observation:", obs)
+            print("Your hand:", obs['hand'])
+        else:
+            print(f"Player {current_player} (AI) is acting.")
+        if env.bidding_phase:
+            valid = list(range(env.action_space.n))
+            if isinstance(current_agent, HumanAgent):
+                action = int(input(f"Your bid (valid options: {valid}): "))
+            else:
+                action = current_agent.bid(obs)
+        else:
+            legal = env.get_legal_actions(env.current_player)
+            if isinstance(current_agent, HumanAgent):
+                print("Global info - Current trick:", env.current_trick)
+                action = int(input(f"Your play (choose card index from {legal}): "))
+            else:
+                action = current_agent.play_card(obs)
+        obs, reward, done, info = env.step(action)
+        print(f"Action taken: {action}, Reward: {reward}\n")
+        if "trick_info" in info:
+            trick_info = info["trick_info"]
+            print("=== Trick Summary ===")
+            print("Trick cards:")
+            for player, card in trick_info["trick_cards"]:
+                print(f"  Player {player}: {card}")
+            print(f"Trick winner: Player {trick_info['trick_winner']}")
+        if "round_bids" in info and "round_tricks_won" in info:
+            print("=== Round Summary ===")
+            print("Bids:", info["round_bids"])
+            print("Tricks won:", info["round_tricks_won"])
+            print("Total scores:", obs.get("total_scores", "N/A"))
+    print("Game complete. Final scores:", env.total_scores)
+    play_again = input("Play again? (y/n): ")
+    if play_again.lower() == 'y':
+        run_interactive(args, agents, logger)
 
 def main():
     torch.autograd.set_detect_anomaly(True)  # Enable anomaly detection

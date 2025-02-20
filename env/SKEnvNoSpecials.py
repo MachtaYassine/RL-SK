@@ -32,8 +32,11 @@ class SkullKingEnvNoSpecials(gym.Env):
         self.hand_size = 10
         self.bid_dimension_vars = ["hand_size", "suit_count", "max_players"]
         self.play_dimension_vars = ["hand_size", "suit_count"]
-        self.fixed_bid_features = 4
-        self.fixed_play_features = 33
+        self.bid_feature_vars = ["total_scores", "position_in_order", "player_id", "round_number", "bidding_phase"]
+        self.play_feature_vars = ["trick_vec", "personal_bid", "tricks_wincount", "all_bids", "all_tricks_won",
+                                  "player_id", "win_one_hot", "win_rank", "current_winner", "position_in_order"]
+        self.fixed_bid_features = self._calculate_feature_count(self.bid_feature_vars)
+        self.fixed_play_features = self._calculate_feature_count(self.play_feature_vars)
         
         # Observation space
         max_hand_size = 10  # Maximum cards in a hand (round 10)
@@ -97,8 +100,17 @@ class SkullKingEnvNoSpecials(gym.Env):
         hand = self.hands[player_index]
         if self.current_trick:
             leading_suit = self.current_trick[0][1][0]
-            actions = [i for i, card in enumerate(hand) if card[0] == leading_suit]
+            highest_card_of_leading_suit = max(
+                (card for _, card in self.current_trick if card[0] == leading_suit),
+                key=lambda x: x[1]
+            )
+            #Card of the same suit and higher rank
+            actions = [i for i, card in enumerate(hand) if card[0] == leading_suit and card[1] > highest_card_of_leading_suit[1]]
             if not actions:
+                #Card of the same suit since no higher card
+                actions = [i for i, card in enumerate(hand) if card[0] != leading_suit]
+            if not actions:
+                #Any card if no card of the same suit
                 actions = list(range(len(hand)))
         else:
             actions = list(range(len(hand)))
@@ -110,7 +122,6 @@ class SkullKingEnvNoSpecials(gym.Env):
             bids_padded = bids + [0] * (self.MAX_PLAYERS - len(bids))
         else:
             bids_padded = bids[:self.MAX_PLAYERS]
-        # Pad tricks_won and total_scores to fixed length MAX_PLAYERS.
         if len(self.tricks_won) < self.MAX_PLAYERS:
             tricks_won_padded = self.tricks_won + [0] * (self.MAX_PLAYERS - len(self.tricks_won))
         else:
@@ -129,19 +140,12 @@ class SkullKingEnvNoSpecials(gym.Env):
             "current_trick": self.current_trick,
             "all_bids": bids_padded,
             "all_tricks_won": tricks_won_padded,
-            "total_scores": total_scores_padded,  # NEW: padded total scores
+            "total_scores": total_scores_padded,
             "current_winner": self.current_winner,
             "winning_card": self.winning_card,
-            "position_in_playing_order": self.current_player if self.player_0_always_starts else (self.current_player - self.round_number + 1) % self.num_players,
+            "position_in_playing_order": self.current_player if self.player_0_always_starts 
+                                         else (self.current_player - self.round_number + 1) % self.num_players,
             "legal_actions": self.get_legal_actions(self.current_player),
-            "suit_count": self.suit_count,
-            "max_rank": self.max_rank,
-            "max_players": self.max_players,
-            "hand_size": self.hand_size,
-            "bid_dimension_vars": self.bid_dimension_vars,
-            "play_dimension_vars": self.play_dimension_vars,
-            "fixed_bid_features": self.fixed_bid_features,
-            "fixed_play_features": self.fixed_play_features,
         }
         return obs
 
@@ -195,9 +199,14 @@ class SkullKingEnvNoSpecials(gym.Env):
         self.current_player = (self.current_player + 1) % self.num_players
 
         if len(self.current_trick) == self.num_players:
+            # Store trick info before clearing
+            trick_info = {"trick_cards": self.current_trick.copy()}
             winner = self.resolve_trick()
+            trick_info["trick_winner"] = winner
             self.tricks_won[winner] += 1
             self.logger.debug(f"Trick complete. Winner: player {winner} with trick: {self.current_trick}", color="green")
+            # NEW: Start next trick with the trick winner.
+            self.current_player = winner
             self.current_trick = []
             self.current_winner = -1
             self.winning_card = (-1, -1)
@@ -208,16 +217,17 @@ class SkullKingEnvNoSpecials(gym.Env):
                 round_rewards = self.calculate_reward()
                 self.total_scores = [ts + r for ts, r in zip(self.total_scores, round_rewards)]
                 current_round = self.round_number  # capture current round before increment
+                info = {"trick_info": trick_info, "round_bids": self.bids, "round_tricks_won": self.tricks_won}
                 if current_round < self.max_rounds:
                     self.logger.info(f"Round {current_round} complete: Round rewards: {round_rewards}, Total scores: {self.total_scores}")
                     obs = self.next_round()
-                    return obs, round_rewards, False, {}
+                    return obs, round_rewards, False, info
                 else:
                     self.logger.info(f"Final round {current_round} complete: Round rewards: {round_rewards}, Total scores: {self.total_scores}")
                     done = True
-                    return self._get_observation(), round_rewards, done, {'round_bids': self.bids, 'round_tricks_won': self.tricks_won}
+                    return self._get_observation(), round_rewards, done, info
             # The hands are not empty, so continue playing.
-            return self._get_observation(), [0] * self.num_players, False, {}
+            return self._get_observation(), [0] * self.num_players, False, {"trick_info": trick_info}
         # Trick not complete, continue playing.
         obs = self._get_observation()
         self.logger.debug(f"Observation after play action: {obs}", color="yellow")
@@ -243,16 +253,19 @@ class SkullKingEnvNoSpecials(gym.Env):
         return self.step(action)
 
     def resolve_trick(self):
-        # Determine winner based on Skull King rules
         lead_suit = self.current_trick[0][1][0]
         trump_suit = "Jolly Roger"
         winning_card = self.current_trick[0][1]
         winner = self.current_trick[0][0]
         for player, card in self.current_trick[1:]:
-            if card[0] == trump_suit and winning_card[0] != trump_suit:
-                winning_card = card
-                winner = player
-            elif card[0] == lead_suit and card[1] > winning_card[1]:
+            # If the new card is trump.
+            if card[0] == trump_suit:
+                # If current winning card is not trump or is trump with lower rank.
+                if winning_card[0] != trump_suit or (winning_card[0] == trump_suit and card[1] > winning_card[1]):
+                    winning_card = card
+                    winner = player
+            # Else if no trump has been played, compare lead suit cards.
+            elif winning_card[0] != trump_suit and card[0] == lead_suit and card[1] > winning_card[1]:
                 winning_card = card
                 winner = player
         return winner
@@ -274,12 +287,58 @@ class SkullKingEnvNoSpecials(gym.Env):
 
     def next_round(self):
         self.round_number += 1
+        # NEW: Store tricks won from this round before resetting.
+        self.last_round_tricks = self.tricks_won.copy()
         self.deck = self.create_deck()
         self.deal_cards()
         self.bids = [None] * self.num_players   # reset bids between rounds
         self.tricks_won = [0] * self.num_players
         self.current_trick = []
         self.bidding_phase = True
-        self.current_player = 0 + (self.round_number-1) % self.num_players if not self.player_0_always_starts else 0
+        # NEW: Force rotation of starting player across rounds.
+        self.player_0_always_starts = False
+        self.current_player = (self.round_number - 1) % self.num_players
         self.action_space = spaces.Discrete(self.round_number + 1)
         return self._get_observation()
+
+    def _calculate_feature_count(self, feature_vars):
+        count = 0
+        if "total_scores" in feature_vars:
+            count += self.MAX_PLAYERS  # Padded length
+        if "position_in_order" in feature_vars:
+            count += 1
+        if "player_id" in feature_vars:
+            count += 1
+        if "round_number" in feature_vars:
+            count += 1
+        if "bidding_phase" in feature_vars:
+            count += 1
+        if "trick_vec" in feature_vars:
+            count += 3
+        if "personal_bid" in feature_vars:
+            count += 1
+        if "tricks_wincount" in feature_vars:
+            count += 1
+        if "all_bids" in feature_vars:
+            count += self.MAX_PLAYERS  # Padded length
+        if "all_tricks_won" in feature_vars:
+            count += self.MAX_PLAYERS  # Padded length
+        if "win_one_hot" in feature_vars:
+            count += 4
+        if "win_rank" in feature_vars:
+            count += 1
+        if "current_winner" in feature_vars:
+            count += 1
+        return count
+
+    def get_env_properties(self):
+        return {
+            "suit_count": self.suit_count,
+            "max_rank": self.max_rank,
+            "max_players": self.max_players,
+            "hand_size": self.hand_size,
+            "bid_dimension_vars": self.bid_dimension_vars,
+            "play_dimension_vars": self.play_dimension_vars,
+            "fixed_bid_features": self.fixed_bid_features,
+            "fixed_play_features": self.fixed_play_features
+        }

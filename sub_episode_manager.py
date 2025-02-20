@@ -1,6 +1,7 @@
 import random
 import torch
 import torch.nn.functional as F
+import numpy as np
 from env.SKEnvNoSpecials import SkullKingEnvNoSpecials
 from agent.NeuralAgent import LearningSkullKingAgent  # NEW import
 
@@ -10,56 +11,48 @@ class SubEpisodeManager:
         self.agents = agents
         self.logger = logger
 
-    def run_sub_episode(self):
-        # Generate random round number [1, 10]
-        round_num = random.randint(1, 10)
-        # Generate random number of players [3, 8]
-        num_players = random.randint(3, 8)
-        # Generate arbitrary total scores per player (range based on round number)
-        total_scores = [random.randint(-round_num * 10, round_num * 10) for _ in range(num_players)]
-        
-        # Instantiate as many agents as generated players using shared networks.
-        # Assume that self.agents[0] is an instance of LearningSkullKingAgent with shared networks.
-        shared_bid_net = self.agents[0].bid_net
-        shared_play_net = self.agents[0].play_net
-        hand_size = self.args.hand_size
-        learning_rate = self.args.learning_rate
-        new_agents = []
-        for _ in range(num_players):
-            agent = LearningSkullKingAgent(num_players, hand_size=hand_size, learning_rate=learning_rate,
-                                           shared_bid_net=shared_bid_net, shared_play_net=shared_play_net)
-            new_agents.append(agent)
-
-        # Create a new environment instance for this sub-episode.
-        env = SkullKingEnvNoSpecials(num_players, logger=self.logger)
-        # Set the round and total scores for this sub-episode.
-        env.round_number = round_num
-        env.max_rounds = round_num  # Only one round will be played.
-        # Pad total_scores to env.MAX_PLAYERS if needed.
-        if len(total_scores) < env.MAX_PLAYERS:
-            total_scores += [0] * (env.MAX_PLAYERS - len(total_scores))
-        env.total_scores = total_scores
-        env.reset()  # Initiate the round (deal cards, etc.)
-
-        shared_loss = None
-        round_score_loss_coef = 0.1
-
+    def run_sub_episode(self, env):
+        episode_rewards = [0] * self.args.num_players
+        round_bid_losses = []         # to record bid prediction loss per round
+        round_play_head_losses = []   # to record play head loss per round
         done = False
-        while not done:
-            current_player = env.current_player
-            agent = new_agents[current_player]  # Use the newly instantiated agents.
+        obs = env.reset()
+        last_round = obs["round_number"]
+        # Choose a random sub-episode length: run for an additional 1-3 rounds.
+        target_round = last_round + random.randint(1, 3)
+        self.logger.info(f"Sub-episode target rounds: {target_round}", color="magenta")
+        while not done and obs["round_number"] < target_round:
+            agent = self.agents[env.current_player]
             obs, reward, done, _ = env.step_with_agent(agent)
-            # If a reward is returned, update loss for learning agents.
-            if reward:
-                round_reward = reward if not isinstance(reward, list) else reward[current_player]
-                if hasattr(agent, "optimizer_bid") and agent.log_probs:
-                    policy_loss = torch.stack([-lp * round_reward for lp in agent.log_probs]).sum()
-                    # Placeholder auxiliary loss (could be refined as needed).
-                    aux_loss = 0.0
-                    loss = policy_loss + round_score_loss_coef * aux_loss
-                    shared_loss = loss if shared_loss is None else shared_loss + loss
-                    agent.log_probs.clear()
-        if shared_loss is not None:
-            # After the sub-episode, update shared optimizers.
-            return shared_loss.item()
-        return 0.0
+            # Update rewards.
+            if isinstance(reward, list):
+                episode_rewards = [er + r for er, r in zip(episode_rewards, reward)]
+            else:
+                episode_rewards[env.current_player] += reward
+            current_round = obs.get("round_number", last_round)
+            if current_round > last_round:
+                # At round transition, compute losses per agent.
+                for i, ag in enumerate(self.agents):
+                    actual_tricks = env.last_round_tricks[i] if hasattr(env, "last_round_tricks") else env.tricks_won[i]
+                    bid_pred = ag.bid_prediction if hasattr(ag, "bid_prediction") and ag.bid_prediction is not None else 0
+                    bid_loss = F.mse_loss(
+                        torch.tensor(bid_pred, dtype=torch.float32),
+                        torch.tensor(actual_tricks, dtype=torch.float32)
+                    )
+                    if ag.trick_win_predictons:
+                        predictions = torch.tensor(ag.trick_win_predictons, dtype=torch.float32)
+                        target = torch.full((len(ag.trick_win_predictons),), actual_tricks, dtype=torch.float32)
+                        play_head_loss = F.mse_loss(predictions, target)
+                    else:
+                        play_head_loss = torch.tensor(0.0, dtype=torch.float32)
+                    round_bid_losses.append(bid_loss.item())
+                    round_play_head_losses.append(play_head_loss.item())
+                    # Reset predictions for next round.
+                    ag.bid_prediction = None
+                    ag.trick_win_predictons.clear()
+                last_round = current_round
+        avg_bid_loss = np.mean(round_bid_losses) if round_bid_losses else 0.0
+        avg_play_loss = np.mean(round_play_head_losses) if round_play_head_losses else 0.0
+        total_loss = avg_bid_loss + avg_play_loss
+        self.logger.info(f"Sub-episode complete: Rewards {episode_rewards}, Loss {total_loss}", color="green")
+        return total_loss
