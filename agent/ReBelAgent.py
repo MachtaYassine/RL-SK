@@ -355,7 +355,9 @@ class ReBel:
                     for t in range(self.T):
                         if t == t_sample:
                             new_pbs = self._sample_leaf(G)
-                        G = self._update_policy(G, set_of_hands)  # Weights now represent \pi^{t}
+                        G = self._update_policy(
+                            G, set_of_hands
+                        )  # Weights now represent \pi^{t}
                         rolling_mean_policy.weights = (
                             t / t + 1
                         ) * rolling_mean_policy.weights + (
@@ -858,3 +860,128 @@ class ReBel:
         return (
             total_tricks / count if count > 0 else total_tricks
         )  # Avoid division by zero
+
+
+class ReBelSkullKingAgent(SkullKingAgent):
+    """
+    A Skull King agent trained using the ReBel algorithm.
+
+    This agent creates and trains its own networks using ReBel, then uses them for bidding and playing.
+    """
+
+    def __init__(self, num_players):
+        super().__init__(num_players)
+        # Initialize new networks if not provided
+        self.policy_network = ReBelPolicyNN()
+        self.bidding_network = ReBelBidNN()
+        self.value_network = ReBelValueNN()
+
+    def train(self, n_rounds=10, K=100, N=50, T=1000, simu_depth=2):
+        """
+        Train the agent using the ReBel algorithm with vectorized cards.
+
+        Args:
+            n_rounds (int): Number of rounds in the game
+            K (int): Number of different hand sets to generate
+            N (int): Number of public belief states per hand set
+            T (int): Number of iterations for policy improvement
+            simu_depth (int): Depth of simulation tree
+        """
+        # Create vectorized deck where each card is [Parrot, Treasure Chest, Treasure Map, Jolly Roger]
+        deck = []
+        for rank in range(1, 15):
+            for suit_idx in range(4):  # 4 suits
+                card = [0, 0, 0, 0]  # one-hot encoding for suit
+                card[suit_idx] = rank  # put rank in the suit's position
+                deck.append(card)
+
+        # Convert deck to tensor for ReBel
+        deck = torch.tensor(deck, dtype=torch.float32)
+
+        # Initialize ReBel trainer
+        rebel = ReBel(
+            n_players=self.num_players,
+            n_rounds=n_rounds,
+            K=K,
+            N=N,
+            T=T,
+            value_network=self.value_network,
+            policy_network=self.policy_network,
+            bidding_network=self.bidding_network,
+            deck=deck,
+            simu_depth=simu_depth,
+        )
+
+        # Train networks
+        rebel.train()
+
+    def _process_observation(self, observation):
+        """Convert observation into tensor format for ReBel networks"""
+        # For bidding: convert hand to one-hot encoding
+        suit_mapping = {
+            "Parrot": 0,
+            "Treasure Chest": 1,
+            "Treasure Map": 2,
+            "Jolly Roger": 3,
+        }
+
+        if observation["bidding_phase"]:
+            # Process for bidding network (hand only)
+            hand = observation["hand"]
+            hand_tensor = torch.zeros(
+                (self.num_players, 4, 14)
+            )  # (players, suits, ranks)
+            for card in hand:
+                suit_idx = suit_mapping[card[0]]
+                rank_idx = card[1] - 1
+                hand_tensor[0, suit_idx, rank_idx] = 1
+            return hand_tensor.flatten()
+        else:
+            # Process for policy network (hand + public belief state)
+            pbs = torch.zeros((observation["round_number"] + 1, self.num_players))
+            # Fill bids
+            pbs[0] = torch.tensor(observation["all_bids"])
+            # Fill played cards
+            for i, (player, card) in enumerate(observation["current_trick"]):
+                if card[0] in suit_mapping:
+                    pbs[i + 1, player] = card[1] + suit_mapping[card[0]] * 14
+
+            hand_tensor = torch.zeros(observation["round_number"])
+            for i, card in enumerate(observation["hand"]):
+                hand_tensor[i] = card[1] + suit_mapping[card[0]] * 14
+
+            return pbs, hand_tensor
+
+    def bid(self, observation):
+        """Use ReBel bidding network to determine bid"""
+        hand_tensor = self._process_observation(observation)
+        with torch.no_grad():
+            bid = self.bidding_network(hand_tensor)
+        bid_value = max(0, min(int(bid.item()), observation["round_number"]))
+        return bid_value
+
+    def play_card(self, observation):
+        """Use ReBel policy network to determine which card to play"""
+        pbs, hand_tensor = self._process_observation(observation)
+        with torch.no_grad():
+            probs = self.policy_network(pbs, hand_tensor)
+
+        # Mask invalid moves
+        valid_moves = torch.zeros(len(observation["hand"]))
+        for i in range(len(observation["hand"])):
+            valid_moves[i] = 1
+        probs = probs[: len(observation["hand"])] * valid_moves
+
+        if probs.sum() == 0:
+            return np.random.randint(len(observation["hand"]))
+
+        probs = probs / probs.sum()
+        action = torch.multinomial(probs, 1).item()
+        return action
+
+    def act(self, observation, bidding_phase):
+        """Main action selection method"""
+        if bidding_phase:
+            return self.bid(observation)
+        else:
+            return self.play_card(observation)
