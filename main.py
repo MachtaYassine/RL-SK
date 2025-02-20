@@ -109,7 +109,7 @@ def parse_args():
     parser.add_argument("--agent_types", nargs="+", default=["learning", "simple", "simple"],
                         help="List of agent types (simple or learning) for each player")
     # New argument for reproducible experiments.
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging for full episode tracing")  
     parser.add_argument("--plot_port", type=int, default=8000,
                         help="Port for live plot server")  # keep for legacy, or ignore
@@ -295,16 +295,23 @@ def main():
 
     logger = setup_logger(logs_dir, args.debug)
 
-    # Set seeds for reproducibility.
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
+    # Set seeds only if a seed is provided.
+    if args.seed is not None:
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
 
     if len(args.agent_types) != args.num_players:
         raise ValueError("Number of agent_types must equal num_players")
 
     agents = init_agents(args, logger)
-    env = SkullKingEnvNoSpecials(num_players=args.num_players, logger=logger)
+    
+    if args.training_regimen == "sub_episode":
+        from env.SubEpisodeEnv import SubEpisodeEnv
+        env = SubEpisodeEnv(num_players=args.num_players, logger=logger)
+    else:
+        from env.SKEnvNoSpecials import SkullKingEnvNoSpecials
+        env = SkullKingEnvNoSpecials(num_players=args.num_players, logger=logger)
     
     agent_rewards, agent_losses = run_training(args, env, agents, logger, writer)
 

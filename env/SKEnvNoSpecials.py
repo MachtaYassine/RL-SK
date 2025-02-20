@@ -295,10 +295,10 @@ class SkullKingEnvNoSpecials(gym.Env):
         self.tricks_won = [0] * self.num_players
         self.current_trick = []
         self.bidding_phase = True
-        # NEW: Force rotation of starting player across rounds.
-        self.player_0_always_starts = False
-        self.current_player = (self.round_number - 1) % self.num_players
+        # NEW: Randomize the starting player for this round.
+        self.current_player = random.randint(0, self.num_players - 1)
         self.action_space = spaces.Discrete(self.round_number + 1)
+        self.logger.info(f"Next round {self.round_number} starts with player {self.current_player} as leader.", color="cyan")
         return self._get_observation()
 
     def _calculate_feature_count(self, feature_vars):
