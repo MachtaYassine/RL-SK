@@ -20,16 +20,18 @@ class HumanAgent:
 
     def play_card(self, observation):
         hand = observation['hand']
+        legal_actions = observation.get("legal_actions", list(range(len(hand))))
         print("Your hand:")
         for i, card in enumerate(hand):
-            print(f"  {i}: {card}")
+            indicator = " (LEGAL)" if i in legal_actions else ""
+            print(f"  {i}: {card}{indicator}")
         while True:
             try:
-                card_index = int(input(f"Enter card index to play (integer between 0 and {len(hand)-1}): "))
-                if 0 <= card_index < len(hand):
+                card_index = int(input(f"Enter card index to play from legal actions {legal_actions}: "))
+                if card_index in legal_actions:
                     return card_index
                 else:
-                    print(f"Invalid card index! Please enter a number between 0 and {len(hand)-1}.")
+                    print(f"Invalid card index! Please enter one of {legal_actions}.")
             except ValueError:
                 print("Invalid input! Please enter an integer.")
 
