@@ -1,7 +1,3 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
 import numpy as np
 import networkx as nx
 from .SimpleAgent import SkullKingAgent
@@ -9,6 +5,20 @@ from .SimpleAgent import SkullKingAgent
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.optim as optim
+from torch.utils.data import Dataset,   DataLoader, TensorDataset
+
+
+class TupleDataset(Dataset):
+    def __init__(self, training_dict):
+        self.data = list(training_dict.items())  # List of ((pbs, hand), target)
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        (pbs, hand), target = self.data[idx]
+        return pbs, hand, target  # Return tuple directly
 
 class ReBelValueNN(nn.Module):
     """
@@ -18,6 +28,7 @@ class ReBelValueNN(nn.Module):
         max_players (int): Maximum number of players the model should support (default=5).
         max_rounds (int): Maximum number of rounds the model should support (default=10).
         hidden_dim (int): Number of units in the hidden layers (default=128).
+        lr (float): Learning rate of the optimizer (default=0.001)
 
     Inputs:
         - pbs (torch.Tensor): Tensor of shape ((n_rounds+1) * n_players).
@@ -32,7 +43,7 @@ class ReBelValueNN(nn.Module):
         - A tensor of shape (1 * max_players) representing the estimated scores for each player.
     """
 
-    def __init__(self, max_players=5, max_rounds=10, hidden_dim=128):
+    def __init__(self, max_players=5, max_rounds=10, hidden_dim=128, lr=0.001):
         super(ReBelValueNN, self).__init__()
         self.max_players = max_players
         self.max_rounds = max_rounds
@@ -46,6 +57,9 @@ class ReBelValueNN(nn.Module):
         self.fc1 = nn.Linear(self.input_dim, self.hidden_dim)
         self.fc2 = nn.Linear(self.hidden_dim, self.hidden_dim // 2)
         self.fc3 = nn.Linear(self.hidden_dim // 2, self.output_dim)
+
+        self.optimizer = optim.Adam(self.parameters(), lr=lr)
+        self.criterion = nn.MSELoss()
 
     def forward(self, pbs, set_of_hands):
         """
@@ -77,6 +91,18 @@ class ReBelValueNN(nn.Module):
         x = self.fc3(x)
         # TODO : Maybe will need to set the extra values to zero, we'll see
         return x  # Shape: (1, max_players)
+    
+    def train(self, training_dict, epochs=10, batch_size=32):
+        dataset = TupleDataset(training_dict)
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+        for _ in range(epochs):
+            for pbs, set_of_hands, targets in dataloader:
+                self.optimizer.zero_grad()
+                outputs = self(pbs, set_of_hands)
+                loss = self.loss_fn(outputs, targets)
+                loss.backward()
+                self.optimizer.step()
 
 
 class ReBelPolicyNN(nn.Module):
@@ -87,6 +113,7 @@ class ReBelPolicyNN(nn.Module):
         max_players (int): Maximum number of players the model should support (default=5).
         max_rounds (int): Maximum number of rounds the model should support (default=10).
         hidden_dim (int): Number of units in the hidden layers (default=128).
+        lr (float): Learning rate of the optimizer (default=0.001)
 
     Inputs:
         - pbs (torch.Tensor): Shape ((n_rounds+1) * n_players).
@@ -101,7 +128,7 @@ class ReBelPolicyNN(nn.Module):
         - A probability distribution over the player's hand (shape: max_rounds, 1).
     """
 
-    def __init__(self, max_players=5, max_rounds=10, hidden_dim=128):
+    def __init__(self, max_players=5, max_rounds=10, hidden_dim=128, lr=0.001):
         super(ReBelPolicyNN, self).__init__()
         self.max_players = max_players
         self.max_rounds = max_rounds
@@ -116,6 +143,9 @@ class ReBelPolicyNN(nn.Module):
         self.fc2 = nn.Linear(self.hidden_dim, self.hidden_dim // 2)
         self.fc3 = nn.Linear(self.hidden_dim // 2, self.output_dim)
 
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=lr)
+        self.loss_fn = nn.CrossEntropyLoss()
+
     def forward(self, pbs, hand):
         """
         Forward pass to estimate action probabilities.
@@ -128,6 +158,7 @@ class ReBelPolicyNN(nn.Module):
             torch.Tensor: Probability distribution over the hand (shape: max_rounds, 1).
         """
         # TODO : Make sure that the cards already played are masked
+        # TODO : Mask the cards that can't be played
         n_rounds, n_players = pbs.shape[0] - 1, pbs.shape[1]
 
         # Pad/mask pbs to size (max_rounds+1, max_players)
@@ -148,6 +179,18 @@ class ReBelPolicyNN(nn.Module):
 
         # Apply softmax to output probabilities
         return F.softmax(x, dim=0)  # Shape: (max_rounds,)
+    
+    def train(self, training_dict, epochs=10, batch_size=32):
+        dataset = TupleDataset(training_dict)
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+        for _ in range(epochs):
+            for pbs, hand, probas in dataloader:
+                self.optimizer.zero_grad()
+                outputs = self(pbs, hand)
+                loss = self.loss_fn(outputs, probas)
+                loss.backward()
+                self.optimizer.step()
 
 class ReBelBidNN(nn.Module):
     """
@@ -156,6 +199,7 @@ class ReBelBidNN(nn.Module):
     Args:
         max_rounds (int): Maximum number of rounds (default=10).
         hidden_dim (int): Number of hidden layer units (default=128).
+        lr (float): Learning rate of the optimizer (default=0.001)
 
     Inputs:
         - hand (torch.Tensor): Shape (n_rounds,).
@@ -168,7 +212,7 @@ class ReBelBidNN(nn.Module):
         - A single value representing the estimated number of tricks to win.
     """
 
-    def __init__(self, max_rounds=10, hidden_dim=128):
+    def __init__(self, max_rounds=10, hidden_dim=128, lr=0.001):
         super(ReBelBidNN, self).__init__()
         self.max_rounds = max_rounds
         self.hidden_dim = hidden_dim
@@ -177,6 +221,9 @@ class ReBelBidNN(nn.Module):
         self.fc1 = nn.Linear(self.max_rounds, self.hidden_dim)
         self.fc2 = nn.Linear(self.hidden_dim, self.hidden_dim // 2)
         self.fc3 = nn.Linear(self.hidden_dim // 2, 1)  # Output is a single value
+
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=lr)
+        self.loss_fn = nn.MSELoss()
 
     def forward(self, hand):
         """
@@ -200,6 +247,25 @@ class ReBelBidNN(nn.Module):
         x = self.fc3(x)
         # TODO : Make sure the output is less than n_rounds
         return x  # Output a single scalar value
+    
+    def train(self, training_dict, epochs=10, batch_size=32):
+        # Process training dict to extract individual hands
+        processed_training_dict = {
+            (hand,): tricks[idx]
+            for hands, tricks in training_dict.items()
+            for idx, hand in enumerate(hands)
+        }
+
+        dataset = TupleDataset(processed_training_dict)
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+        for _ in range(epochs):
+            for (hand,), bid in dataloader:
+                self.optimizer.zero_grad()
+                outputs = self(hand)
+                loss = self.loss_fn(outputs, bid)
+                loss.backward()
+                self.optimizer.step()
 
 def rebel_loop(
     n_players: int,
@@ -250,20 +316,24 @@ def rebel_loop(
                 rolling_mean_policy = G.copy() # We will update the weights on this graph as a way of representing a policy
                 # Initial value associated to the pbs
                 expected_value = get_expected_value(G, bids, value_network)
-                t_sample = None # Proba on [0, ..., T] growing with t 
+                # Sample a timestep `t_sample` with increasing probability
+                t_sample = np.random.choice(np.arange(T), p=np.linspace(0.1, 1, T) / np.sum(np.linspace(0.1, 1, T)))
                 for t in range(T):
                     if t == t_sample:
                         new_pbs = sample_leaf(G)
                     G = update_policy(G) # Weights now represent \pi^{t}
                     rolling_mean_policy.weights = (t/t+1) * rolling_mean_policy.weights + (1/t+1) * G.weights # Update average policy
                     expected_value = (t/t+1) * expected_value + (1/t+1) * get_expected_value(G, bids, value_network) # Update expected value
-                value_network_training_dict[torch.cat(pbs, set_of_hands)] = expected_value
+                value_network_training_dict[(pbs, set_of_hands)] = expected_value
                 for state in rolling_mean_policy.node:
-                    player = None # Deduce these from the first inf in state
+                    mask = (pbs[1:] == -1)
+                    _, player = torch.nonzero(mask, as_tuple=True)[0]  # Get the first -1
+                    player = player.item()
                     player_hand = set_of_hands[player]
-                    probas = None # Weights of the edges originating from state in a tensor
-                    info = torch.cat(state, player_hand)
-                    policy_network_training_dict[info] = probas
+                    probas = torch.tensor(
+                        [G[tuple(map(tuple, pbs.numpy()))][child]['weight'] for child in G.successors(tuple(map(tuple, pbs.numpy())))]
+                    ) # Weights of the edges originating from state in a tensor
+                    policy_network_training_dict[(state, player_hand)] = probas
                 pbs = new_pbs
         value_network.train(value_network_training_dict) # Update value network
         policy_network.train(policy_network_training_dict) # Update policy network
