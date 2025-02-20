@@ -106,28 +106,53 @@ class SubEpisodeManager:
 
         avg_bid_loss = np.mean(round_bid_losses) if round_bid_losses else 0.0
         avg_play_loss = np.mean(round_play_head_losses) if round_play_head_losses else 0.0
+        total_reward = sum(episode_rewards)
         total_loss = avg_bid_loss + avg_play_loss
         self.logger.info(
             f"Round {last_round} complete: Rewards {episode_rewards}, Loss {total_loss}",
             color="green"
         )
-        return total_loss
+        return total_loss, avg_bid_loss, avg_play_loss, total_reward
 
 # Main training function for sub-episode regimen.
 def run_sub_episode_training(args, env, agents, logger, writer=None):
     sub_manager = SubEpisodeManager(args, agents, logger)
-    all_rewards = [[] for _ in range(args.num_players)]
-    all_losses = [[] for _ in range(args.num_players)]
+    # For shared networks, we record shared metrics; otherwise, per-agent lists.
+    if args.shared_networks:
+        shared_rewards = []
+        shared_losses = []
+        shared_bid_losses = []
+        shared_play_head_losses = []
+        shared_total_rewards = []
+    else:
+        all_rewards = [[] for _ in range(args.num_players)]
+        all_losses = [[] for _ in range(args.num_players)]
+    
     for episode in range(args.num_episodes):
         logger.info(f"--- Sub-episode {episode+1} start ---", color="magenta")
         sub_manager.reinitialize_agents(env)
-        loss = sub_manager.run_sub_episode(env)
+        loss, avg_bid_loss, avg_play_loss, total_reward = sub_manager.run_sub_episode(env)
         logger.info(f"Sub-episode {episode+1} complete, loss: {loss}", color="green")
         if writer:
-            writer.add_scalar("Sub_Episode/Loss", loss, episode)
-        for i in range(args.num_players):
-            all_rewards[i].append(0)
-            all_losses[i].append(loss if loss is not None else 0)
-    return all_rewards, all_losses
-
-# If desired, you can retain run_base_training from the original implementation.
+            if args.shared_networks:
+                writer.add_scalar("Sub_Episode/Shared_Bid_Loss", avg_bid_loss, episode)
+                writer.add_scalar("Sub_Episode/Shared_PlayHead_Loss", avg_play_loss, episode)
+                writer.add_scalar("Sub_Episode/Shared_Reward_Total", total_reward, episode)
+            else:
+                writer.add_scalar("Sub_Episode/Loss_Bid", avg_bid_loss, episode)
+                writer.add_scalar("Sub_Episode/Loss_PlayHead", avg_play_loss, episode)
+                writer.add_scalar("Sub_Episode/Reward_Total", total_reward, episode)
+        if args.shared_networks:
+            shared_rewards.append(total_reward)
+            shared_losses.append(loss)
+            shared_bid_losses.append(avg_bid_loss)
+            shared_play_head_losses.append(avg_play_loss)
+        else:
+            for i in range(args.num_players):
+                all_rewards[i].append(0)
+                all_losses[i].append(loss if loss is not None else 0)
+        # End of episode loop.
+    if args.shared_networks:
+        return shared_rewards, (shared_losses, shared_bid_losses, shared_play_head_losses)
+    else:
+        return all_rewards, (all_losses, None, None)

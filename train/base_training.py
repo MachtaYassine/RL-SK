@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+import numpy as np
 
 # Helper: update shared optimizers if in shared mode.
 def update_shared(shared_opt_bid, shared_opt_play, loss):
@@ -66,8 +67,12 @@ def run_episode(args, env, agents, logger, round_score_loss_coef, double_positiv
                 ag.trick_win_predictons.clear()
             last_round = current_round  # update round tracking
 
+    avg_bid_loss = np.mean(round_bid_losses) if round_bid_losses else 0.0
+    avg_play_loss = np.mean(round_play_head_losses) if round_play_head_losses else 0.0
+    total_reward = sum(episode_rewards)
+    total_loss = avg_bid_loss + avg_play_loss
     # Return losses along with rewards.
-    return episode_rewards, shared_loss, round_bid_losses, round_play_head_losses
+    return episode_rewards, shared_loss, avg_bid_loss, avg_play_loss, total_reward
 
 # Main functional training procedure.
 def run_base_training(args, env, agents, logger, writer=None):
@@ -85,20 +90,34 @@ def run_base_training(args, env, agents, logger, writer=None):
     all_losses = [[] for _ in range(args.num_players)]
     all_bid_losses = []         # NEW: to collect bid losses per round across episodes
     all_play_head_losses = []   # NEW: to collect play head losses per round across episodes
+    all_total_rewards = []
     for episode in range(args.num_episodes):
         logger.debug(f"=== Episode {episode+1} start ===", color="magenta")
-        ep_rewards, shared_loss, round_bid_losses, round_play_head_losses = run_episode(
+        ep_rewards, shared_loss, avg_bid_loss, avg_play_loss, total_reward = run_episode(
             args, env, agents, logger, round_score_loss_coef, args.double_positive_rewards
         )
         if args.shared_networks and shared_loss is not None and shared_opts is not None:
             update_shared(shared_opts[0], shared_opts[1], shared_loss)
-        for i in range(args.num_players):
-            all_rewards[i].append(ep_rewards[i])
+        # After running the episode and obtaining ep_rewards and total_reward:
+        if args.shared_networks:
+            all_total_rewards.append(total_reward)
             if writer:
-                writer.add_scalar(f"Agent_{i}/Reward", ep_rewards[i], episode)
+                writer.add_scalar("Shared/Reward_Total", total_reward, episode)
+        else:
+            for i in range(args.num_players):
+                all_rewards[i].append(ep_rewards[i])
+                if writer:
+                    writer.add_scalar(f"Agent_{i}/Reward", ep_rewards[i], episode)
         # NEW: Log the losses for this episode (round-wise).
-        all_bid_losses.extend(round_bid_losses)
-        all_play_head_losses.extend(round_play_head_losses)
+        all_bid_losses.append(avg_bid_loss)
+        all_play_head_losses.append(avg_play_loss)
+        all_total_rewards.append(total_reward)
+        if writer:
+            writer.add_scalar("Loss/Bid", avg_bid_loss, episode)
+            writer.add_scalar("Loss/PlayHead", avg_play_loss, episode)
+            writer.add_scalar("Reward/Total", total_reward, episode)
+            if shared_loss is not None:
+                writer.add_scalar("Loss/Policy", shared_loss.item(), episode)
         logger.info(f"--- Episode {episode+1} complete ---", color="green")
         logger.info(f"Episode rewards: {ep_rewards}", color="green")
     # Pack the loss curves with rewards for plotting.

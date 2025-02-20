@@ -275,6 +275,12 @@ def main():
     torch.autograd.set_detect_anomaly(True)  # Enable anomaly detection
     args = parse_args()
     
+    # Enforce shared networks for sub-episode training.
+    if args.training_regimen == "sub_episode" and not args.shared_networks:
+        # Force shared networks for sub-episode training.
+        args.shared_networks = True
+        print("Warning: Sub-episode training requires shared networks. Enabling shared_networks.")
+
     # Set up logs folder and compute experiment-specific logs_dir.
     logs_dir = "logs"
     experiment_properties = f"players_{args.num_players}_episodes_{args.num_episodes}_agents_{'_'.join(args.agent_types)}_env_{args.env_name}"
