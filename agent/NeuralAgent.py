@@ -40,8 +40,8 @@ class PolicyNetwork(nn.Module):
 
 class LearningSkullKingAgent(SkullKingAgent):
     def __init__(self, num_players, hand_size=10, learning_rate=1e-3, shared_bid_net=None, shared_play_net=None,
+                 shared_trick_win_predictor=None,   # NEW parameter
                  suit_count=4, max_rank=14, max_players=10, bid_dimension_vars=None, play_dimension_vars=None,
-                 # fixed features removed – now using fixed dimensions:
                  bid_hidden_dims=None, play_hidden_dims=None):
         super().__init__(num_players)
         self.hand_size = hand_size
@@ -57,14 +57,20 @@ class LearningSkullKingAgent(SkullKingAgent):
         if shared_bid_net is not None and shared_play_net is not None:
             self.bid_net = shared_bid_net
             self.play_net = shared_play_net
+            # NEW: use shared trick predictor if provided, else create one.
+            if shared_trick_win_predictor is not None:
+                self.trick_win_predictor = shared_trick_win_predictor
+            else:
+                self.trick_win_predictor = nn.Linear(hidden_dim, 11)
         else:
             self.bid_net = PolicyNetwork(bid_input_dim, output_dim=11, hidden_dims=bid_hidden_dims)
             self.play_net = PolicyNetwork(play_input_dim, output_dim=hand_size, hidden_dims=play_hidden_dims)
+            self.trick_win_predictor = nn.Linear(hidden_dim, 11)
         assert self.bid_net.model[0].in_features == bid_input_dim, f"Bid net input dimension mismatch: expected {bid_input_dim}, got {self.bid_net.model[0].in_features}"
         assert self.play_net.model[0].in_features == play_input_dim, f"Play net input dimension mismatch: expected {play_input_dim}, got {self.play_net.model[0].in_features}"
         hidden_dim = play_hidden_dims[-1] if play_hidden_dims is not None else 64
-        self.trick_win_predictor = nn.Linear(hidden_dim, 11)
         self.optimizer_bid = optim.Adam(self.bid_net.parameters(), lr=learning_rate)
+        # Note: In shared mode, each agent’s play optimizer will be built from the shared play_net plus the shared trick predictor.
         self.optimizer_play = optim.Adam(
             list(self.play_net.parameters()) + list(self.trick_win_predictor.parameters()),
             lr=learning_rate
@@ -124,27 +130,23 @@ class LearningSkullKingAgent(SkullKingAgent):
     def bid(self, observation):
         input_tensor = self._process_bid_observation(observation)
         logits = self.bid_net(input_tensor)
-        effective_actions = int(observation['round_number']) + 1  # valid bids: 0 to round_number inclusive
+        effective_actions = int(observation['round_number']) + 1
         indices = torch.arange(logits.shape[0], device=logits.device)
-        # NEW: Build mask without in-place modifications.
-        mask = torch.where(
-            indices < effective_actions,
-            torch.zeros_like(logits),
-            torch.full_like(logits, -float('inf'))
-        )
+        mask = torch.where(indices < effective_actions,
+                           torch.zeros_like(logits),
+                           torch.full_like(logits, -float('inf')))
         masked_logits = logits + mask
         probs = F.softmax(masked_logits, dim=-1)
         m = torch.distributions.Categorical(probs)
-        action = m.sample().item()
-        log_prob = m.log_prob(torch.tensor(action))
+        action_tensor = m.sample()  
+        log_prob = m.log_prob(action_tensor)
         self.log_probs.append(log_prob)
-        # NEW: Store the chosen bid as a prediction for later loss calculation.
-        self.bid_prediction = action  
-        return action
+        # NEW: Instead of storing the integer action, store the raw predicted tensor.
+        self.bid_prediction = probs  
+        return action_tensor.item()
 
     def play_card(self, observation):
         input_tensor = self._process_play_observation(observation)
-        # Use play_net's layers to compute hidden representation and logits.
         layers = list(self.play_net.model.children())
         hidden_model = torch.nn.Sequential(*layers[:-1])
         hidden = hidden_model(input_tensor)
@@ -164,17 +166,18 @@ class LearningSkullKingAgent(SkullKingAgent):
             torch.full_like(trick_win_logits, -float('inf'))
         )
         trick_win_logits_masked = trick_win_logits + mask_trick_win
+        # NEW: Instead of sampling, use the softmax directly as the prediction.
         trick_win_probs = F.softmax(trick_win_logits_masked, dim=-1)
-        d = torch.distributions.Categorical(trick_win_probs)
-        predicted_number_of_tricks_won = d.sample().item()
-
+        # Store these probabilities so that loss computed on them is differentiable.
+        self.trick_win_predictons.append(trick_win_probs)
+        
+        # Continue with action selection for play:
         probs = F.softmax(masked_logits, dim=-1)
         m = torch.distributions.Categorical(probs)
-        action = m.sample().item()
-        log_prob = m.log_prob(torch.tensor(action))
+        action_tensor = m.sample()
+        log_prob = m.log_prob(action_tensor)
         self.log_probs.append(log_prob)
-        self.trick_win_predictons.append(predicted_number_of_tricks_won)
-        return action
+        return action_tensor.item()
 
     def act(self, observation, bidding_phase):
         if bidding_phase:

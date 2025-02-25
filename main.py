@@ -4,6 +4,7 @@ import numpy as np
 import random
 import torch
 import torch.nn.functional as F
+import torch.nn as nn
 import logging
 import os  # NEW: for file system operations
 import matplotlib.pyplot as plt  # NEW: for plotting
@@ -144,12 +145,12 @@ def init_agents(args, logger):
     agents = []
     shared_bid_net = None
     shared_play_net = None
+    shared_trick_win_predictor = None  # NEW: shared trick predictor
     from agent.NeuralAgent import PolicyNetwork, LearningSkullKingAgent
     for agent_type in args.agent_types:
         if agent_type not in AGENT_CLASSES:
             raise ValueError(f"Unknown agent type: {agent_type}")
         AgentClass = load_agent_class(AGENT_CLASSES[agent_type])
-        # Create a temporary environment to get dimension properties.
         temp_env = SkullKingEnvNoSpecials(num_players=args.num_players, logger=logger)
         temp_props = temp_env.get_env_properties()
         suit_count = temp_props["suit_count"]
@@ -166,8 +167,11 @@ def init_agents(args, logger):
             if shared_bid_net is None:
                 shared_bid_net = PolicyNetwork(bid_input_dim, output_dim=11, hidden_dims=args.bid_hidden_dims)
                 shared_play_net = PolicyNetwork(play_input_dim, output_dim=hand_size, hidden_dims=args.play_hidden_dims)
+                # NEW: Create shared trick predictor using the same hidden dimension as play network's last hidden layer.
+                shared_trick_win_predictor = nn.Linear(args.play_hidden_dims[-1] if args.play_hidden_dims else 64, 11)
             agent = AgentClass(args.num_players, hand_size=hand_size, learning_rate=args.learning_rate,
                                shared_bid_net=shared_bid_net, shared_play_net=shared_play_net,
+                               shared_trick_win_predictor=shared_trick_win_predictor,  # Pass shared trick predictor
                                suit_count=suit_count, max_rank=max_rank, max_players=max_players,
                                bid_dimension_vars=bid_dimension_vars, play_dimension_vars=play_dimension_vars,
                                bid_hidden_dims=args.bid_hidden_dims, play_hidden_dims=args.play_hidden_dims)
@@ -189,35 +193,68 @@ def run_training(args, env, agents, logger, writer):
         from train.base_training import run_base_training
         return run_base_training(args, env, agents, logger, writer)
 
-def run_plots(logs_dir, agent_rewards, loss_data, num_players):
-    import matplotlib.pyplot as plt
-    # Plot rewards
-    plt.figure(figsize=(10,5))
+def run_plots(logs_dir, agent_rewards, agent_losses, num_players):
+    """
+    Generate plots for rewards and losses over episodes.
+
+    Parameters:
+    - logs_dir (str): Directory to save the plots.
+    - agent_rewards (list of lists): Rewards per agent over episodes.
+    - agent_losses (tuple): Tuple containing (all_losses, all_bid_losses, all_play_head_losses, all_policy_losses).
+    - num_players (int): Number of players/agents in the environment.
+    """
+    os.makedirs(logs_dir, exist_ok=True)
+    
+    all_losses, all_bid_losses, all_play_head_losses, all_policy_losses = agent_losses
+    num_episodes = len(agent_rewards[0])  # Assuming all agents have same number of episodes
+    episodes = np.arange(num_episodes)
+    
+    print(f'num_episodes: {num_episodes}')
+    print(f'len(agent_rewards): {len(agent_rewards)}')
+    print(f'len(all_losses): {len(all_losses)}')
+    print(f'len(all_bid_losses): {len(all_bid_losses)}')
+    
+    
+    # Plot rewards per agent
+    plt.figure(figsize=(10, 5))
     for i in range(num_players):
-        plt.plot(agent_rewards[i], label=f"Agent {i} Reward")
-    # ...existing labels, title, legend...
-    plt.savefig(f"{logs_dir}/training_curve.png")
-    # Plot policy losses (if any)
-    # ...existing loss plots...
-    # NEW: Plot bid prediction loss over rounds.
-    _, bid_losses, play_head_losses = loss_data
-    plt.figure(figsize=(10,5))
-    plt.plot(bid_losses, label="Bid Prediction Loss")
-    plt.xlabel("Round index")
-    plt.ylabel("Loss")
-    plt.title("Bid Network Loss per Round")
+        plt.plot(episodes, agent_rewards[i], label=f'Agent {i} Reward')
+    plt.xlabel('Episode')
+    plt.ylabel('Reward')
+    plt.title('Rewards per Episode')
     plt.legend()
-    plt.savefig(f"{logs_dir}/bid_loss_curve.png")
-    # NEW: Plot play network prediction (trick win) loss over rounds.
-    plt.figure(figsize=(10,5))
-    plt.plot(play_head_losses, label="Play Head Loss")
-    plt.xlabel("Round index")
-    plt.ylabel("Loss")
-    plt.title("Play Network (Second Head) Loss per Round")
+    plt.savefig(os.path.join(logs_dir, 'rewards.png'))
+    plt.close()
+    
+    # Plot bid loss
+    plt.figure(figsize=(10, 5))
+    plt.plot(episodes, all_bid_losses, label='Bid Loss', color='red')
+    plt.xlabel('Episode')
+    plt.ylabel('Loss')
+    plt.title('Bid Loss per Episode')
     plt.legend()
-    plt.savefig(f"{logs_dir}/play_head_loss_curve.png")
-    # Plot losses accumulated per agent if desired.
-    # ...existing code...
+    plt.savefig(os.path.join(logs_dir, 'bid_loss.png'))
+    plt.close()
+    
+    # Plot play head loss
+    plt.figure(figsize=(10, 5))
+    plt.plot(episodes, all_play_head_losses, label='Play Head Loss', color='blue')
+    plt.xlabel('Episode')
+    plt.ylabel('Loss')
+    plt.title('Play Head Loss per Episode')
+    plt.legend()
+    plt.savefig(os.path.join(logs_dir, 'play_head_loss.png'))
+    plt.close()
+    
+    # Plot policy loss
+    plt.figure(figsize=(10, 5))
+    plt.plot(episodes, all_policy_losses, label='Policy Loss', color='green')
+    plt.xlabel('Episode')
+    plt.ylabel('Loss')
+    plt.title('Policy Loss per Episode')
+    plt.legend()
+    plt.savefig(os.path.join(logs_dir, 'policy_loss.png'))
+    plt.close()
 
 def run_interactive(args, agents, logger):
     from env.SKEnvNoSpecials import SkullKingEnvNoSpecials
@@ -320,6 +357,7 @@ def main():
         env = SkullKingEnvNoSpecials(num_players=args.num_players, logger=logger)
     
     agent_rewards, agent_losses = run_training(args, env, agents, logger, writer)
+    
 
     logger.info("Training complete.", color="green")
 

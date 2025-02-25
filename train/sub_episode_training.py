@@ -88,28 +88,28 @@ class SubEpisodeManager:
 
         for i, ag in enumerate(self.agents):
             actual_tricks = env.last_round_tricks[i] if hasattr(env, "last_round_tricks") else env.tricks_won[i]
-            bid_pred = ag.bid_prediction if hasattr(ag, "bid_prediction") and ag.bid_prediction is not None else 0
-            bid_loss = F.mse_loss(
-                torch.tensor(bid_pred, dtype=torch.float32),
-                torch.tensor(actual_tricks, dtype=torch.float32)
-            )
+            bid_input = (ag.bid_prediction if hasattr(ag, "bid_prediction") and ag.bid_prediction is not None 
+                         else torch.tensor(0.0, dtype=torch.float32))
+            bid_loss = F.mse_loss(bid_input, torch.tensor(actual_tricks, dtype=torch.float32))
             if ag.trick_win_predictons:
-                predictions = torch.tensor(ag.trick_win_predictons, dtype=torch.float32)
-                target = torch.full((len(ag.trick_win_predictons),), actual_tricks, dtype=torch.float32)
-                play_head_loss = F.mse_loss(predictions, target)
+                predictions = torch.stack(ag.trick_win_predictons) if isinstance(ag.trick_win_predictons[0], torch.Tensor) \
+                              else torch.tensor(ag.trick_win_predictons, dtype=torch.float32)
+                play_head_loss = F.mse_loss(predictions, torch.full((len(ag.trick_win_predictons),), actual_tricks, dtype=torch.float32))
             else:
                 play_head_loss = torch.tensor(0.0, dtype=torch.float32)
-            round_bid_losses.append(bid_loss.item())
-            round_play_head_losses.append(play_head_loss.item())
+            round_bid_losses.append(bid_loss)
+            round_play_head_losses.append(play_head_loss)
             ag.bid_prediction = None
             ag.trick_win_predictons.clear()
 
-        avg_bid_loss = np.mean(round_bid_losses) if round_bid_losses else 0.0
-        avg_play_loss = np.mean(round_play_head_losses) if round_play_head_losses else 0.0
-        total_reward = sum(episode_rewards)
+        avg_bid_loss = torch.mean(torch.stack(round_bid_losses)) if round_bid_losses else torch.tensor(0.0, dtype=torch.float32)
+        avg_play_loss = torch.mean(torch.stack(round_play_head_losses)) if round_play_head_losses else torch.tensor(0.0, dtype=torch.float32)
+        total_reward = torch.tensor(sum(episode_rewards), dtype=torch.float32)
         total_loss = avg_bid_loss + avg_play_loss
+        policy_Loss = - total_reward / torch.tensor(len(self.agents), dtype=torch.float32)
+        total_loss = total_loss + policy_Loss
         self.logger.info(
-            f"Round {last_round} complete: Rewards {episode_rewards}, Loss {total_loss}",
+            f"Round {last_round} complete: Rewards {episode_rewards}, Loss {total_loss.item()}, Policy Loss {policy_Loss.item()}, Bid Loss {avg_bid_loss.item()}, Play Head Loss {avg_play_loss.item()}",
             color="green"
         )
         return total_loss, avg_bid_loss, avg_play_loss, total_reward
@@ -117,13 +117,14 @@ class SubEpisodeManager:
 # Main training function for sub-episode regimen.
 def run_sub_episode_training(args, env, agents, logger, writer=None):
     sub_manager = SubEpisodeManager(args, agents, logger)
-    # For shared networks, we record shared metrics; otherwise, per-agent lists.
     if args.shared_networks:
         shared_rewards = []
         shared_losses = []
         shared_bid_losses = []
         shared_play_head_losses = []
         shared_total_rewards = []
+        # Initialize shared optimizers from the first agent (they are shared)
+        shared_opts = (agents[0].optimizer_bid, agents[0].optimizer_play)
     else:
         all_rewards = [[] for _ in range(args.num_players)]
         all_losses = [[] for _ in range(args.num_players)]
@@ -131,18 +132,18 @@ def run_sub_episode_training(args, env, agents, logger, writer=None):
     for episode in range(args.num_episodes):
         logger.info(f"--- Sub-episode {episode+1} start ---", color="magenta")
         sub_manager.reinitialize_agents(env)
+        # Compute loss and metrics for the sub-episode.
         loss, avg_bid_loss, avg_play_loss, total_reward = sub_manager.run_sub_episode(env)
         logger.info(f"Sub-episode {episode+1} complete, loss: {loss}", color="green")
-        if writer:
-            if args.shared_networks:
-                writer.add_scalar("Sub_Episode/Shared_Bid_Loss", avg_bid_loss, episode)
-                writer.add_scalar("Sub_Episode/Shared_PlayHead_Loss", avg_play_loss, episode)
-                writer.add_scalar("Sub_Episode/Shared_Reward_Total", total_reward, episode)
-            else:
-                writer.add_scalar("Sub_Episode/Loss_Bid", avg_bid_loss, episode)
-                writer.add_scalar("Sub_Episode/Loss_PlayHead", avg_play_loss, episode)
-                writer.add_scalar("Sub_Episode/Reward_Total", total_reward, episode)
+        # If shared networks, update parameters using the aggregated loss.
         if args.shared_networks:
+            # Here you could aggregate losses over multiple rounds if desired.
+            if loss is not None:
+                from train.base_training import update_shared
+                update_shared(shared_opts[0], shared_opts[1], loss)
+            writer.add_scalar("Sub_Episode/Shared_Bid_Loss", avg_bid_loss, episode)
+            writer.add_scalar("Sub_Episode/Shared_PlayHead_Loss", avg_play_loss, episode)
+            writer.add_scalar("Sub_Episode/Shared_Reward_Total", total_reward, episode)
             shared_rewards.append(total_reward)
             shared_losses.append(loss)
             shared_bid_losses.append(avg_bid_loss)
