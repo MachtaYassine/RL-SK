@@ -70,18 +70,27 @@ def run_episode(args, env, agents, logger, round_score_loss_coef, double_positiv
                     
                 # POlicy loss, get log_probs
                 log_porbs_for_round = torch.stack(ag.log_probs) # One action for bid and n_round for cards played
-                round_score_for_agent = reward[i]/100 # to normalize
+                reward[i]= 2*reward[i] if reward[i]<0 else reward[i] # double positive rewards to Punish more negative rewards
+                round_score_for_agent = 1-reward[i]/(last_round*20)
+                if round_score_for_agent<0:
+                    logger.warning(f"Negative score for agent {i} in round {last_round}, reward {reward[i]} and last_round {last_round}")
+                #if the log probs are positive also warn:
+                if torch.any(log_porbs_for_round>0):
+                    logger.warning(f"Positive log probs for agent {i} in round {last_round}")
                 #make tensore shape of log probs with round_score as value for all entreis
                 round_score_tensor = torch.full_like(log_porbs_for_round, round_score_for_agent)
                 #compute policy loss
                 policy_loss = -torch.mean(round_score_tensor * log_porbs_for_round).sum() 
                 logger.info(
-                    f"Agent {i}: Actual tricks won {actual_tricks} | Bid prediction distribution: {bid_input.detach().cpu().numpy()} | "
-                    f"Bid loss: {bid_loss.item()} || "
-                    f"Play head prediction distribution (mean): {torch.mean(predictions,dim=0).detach().cpu().numpy()} | "
-                    f"Play head loss: {play_head_loss.item()}",
+                    f"Agent {i}: Actual tricks won {actual_tricks} | "
+                    f"Bid prediction distribution: {np.array2string(bid_input.detach().cpu().numpy(), formatter={'float_kind': lambda x: f'{x:.1e}'})} | "
+                    f"Bid loss: {bid_loss.item():.1e} || "
+                    f"Play head prediction distribution (mean): {np.array2string(torch.mean(predictions, dim=0).detach().cpu().numpy(), formatter={'float_kind': lambda x: f'{x:.1e}'})} | "
+                    f"Play head loss: {play_head_loss.item():.1e} | "
+                    f"Policy loss: {policy_loss.item():.1e}",
                     color="blue"
                 )
+
                 round_bid_losses.append(bid_loss)
                 round_play_head_losses.append(play_head_loss)
                 round_policy_losses.append(policy_loss)

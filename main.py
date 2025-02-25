@@ -161,8 +161,9 @@ def init_agents(args, logger):
         play_dimension_vars = temp_props["play_dimension_vars"]
         fixed_bid_features = temp_props["fixed_bid_features"]
         fixed_play_features = temp_props["fixed_play_features"]
-        bid_input_dim = hand_size * 5 + fixed_bid_features
-        play_input_dim = hand_size * 5 + fixed_play_features
+        bid_input_dim = hand_size * 5 + 14   # 10 from total_scores + 4 extra scalars: position_in_order, player_id, round_number, bidding_phase
+        play_input_dim = hand_size * 5 + max_players * 5 +3+ 1 + 1 +10+ 10 +1 +5 +2   # Computed as: hand_vec + 3+40 (trick_vec) +2 ([personal_bid, tricks_wincount]) + 10 +10 + 1 +4 +1+2
+        
         if agent_type == "learning" and args.shared_networks:
             if shared_bid_net is None:
                 shared_bid_net = PolicyNetwork(bid_input_dim, output_dim=11, hidden_dims=args.bid_hidden_dims)

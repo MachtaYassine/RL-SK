@@ -119,15 +119,15 @@ class SkullKingEnvNoSpecials(gym.Env):
     def _get_observation(self):
         bids = [bid if bid is not None else 0 for bid in self.bids]
         if len(bids) < self.MAX_PLAYERS:
-            bids_padded = bids + [0] * (self.MAX_PLAYERS - len(bids))
+            bids_padded = bids + [-1] * (self.MAX_PLAYERS - len(bids))
         else:
             bids_padded = bids[:self.MAX_PLAYERS]
         if len(self.tricks_won) < self.MAX_PLAYERS:
-            tricks_won_padded = self.tricks_won + [0] * (self.MAX_PLAYERS - len(self.tricks_won))
+            tricks_won_padded = self.tricks_won + [-1] * (self.MAX_PLAYERS - len(self.tricks_won))
         else:
             tricks_won_padded = self.tricks_won[:self.MAX_PLAYERS]
         if len(self.total_scores) < self.MAX_PLAYERS:
-            total_scores_padded = self.total_scores + [0] * (self.MAX_PLAYERS - len(self.total_scores))
+            total_scores_padded = self.total_scores + [-100000] * (self.MAX_PLAYERS - len(self.total_scores))
         else:
             total_scores_padded = self.total_scores[:self.MAX_PLAYERS]
         obs = {

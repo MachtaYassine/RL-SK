@@ -6,20 +6,34 @@ import numpy as np
 from .SimpleAgent import SkullKingAgent
 
 # Helper: process hand information
-def process_hand(hand, hand_size, suit_mapping):
+def process_hand(hand, hand_size, suit_mapping, legal_actions=None):
     hand_vec = []
     for card in hand:
+        # If the card is not legal, replace with [0, 0, 0, 0, 0]
+        if legal_actions and card not in legal_actions:
+            hand_vec.extend([0, 0, 0, 0, 0])
+            continue
+        
+        # One-hot encoding for the suit
         one_hot = [0, 0, 0, 0]
         if card[0] in suit_mapping:
             one_hot[suit_mapping[card[0]]] = 1
+        
+        # Convert rank to float
         try:
             rank = float(card[1])
         except (ValueError, TypeError):
             rank = 0.0
+        
+        # Append one-hot suit encoding + rank
         hand_vec.extend(one_hot + [rank])
+    
+    # Ensure fixed hand size by padding
     while len(hand_vec) < hand_size * 5:
         hand_vec.extend([0] * 5)
+    
     return hand_vec
+
 
 class PolicyNetwork(nn.Module):
     def __init__(self, input_dim, output_dim, hidden_dims=None):
@@ -41,7 +55,7 @@ class PolicyNetwork(nn.Module):
 class LearningSkullKingAgent(SkullKingAgent):
     def __init__(self, num_players, hand_size=10, learning_rate=1e-3, shared_bid_net=None, shared_play_net=None,
                  shared_trick_win_predictor=None,   # NEW parameter
-                 suit_count=4, max_rank=14, max_players=10, bid_dimension_vars=None, play_dimension_vars=None,
+                 suit_count=4, max_rank=14, max_players=8, bid_dimension_vars=None, play_dimension_vars=None,
                  bid_hidden_dims=None, play_hidden_dims=None):
         super().__init__(num_players)
         self.hand_size = hand_size
@@ -53,7 +67,7 @@ class LearningSkullKingAgent(SkullKingAgent):
         self.log_probs = []
         # NEW: Use hardcoded extra features dimensions:
         bid_input_dim = hand_size * 5 + 14   # 10 from total_scores + 4 extra scalars: position_in_order, player_id, round_number, bidding_phase
-        play_input_dim = hand_size * 5 + 33    # Computed as: hand_vec + 3 (trick_vec) +2 ([personal_bid, tricks_wincount]) + 10 +10 + 1 +4 +1+2
+        play_input_dim = hand_size * 5 + self.max_players * 5 +3+ 1 + 1 +10+ 10 +1 +5 +2   # Computed as: hand_vec + 3+40 (trick_vec) +2 ([personal_bid, tricks_wincount]) + 10 +10 + 1 +4 +1+2
         if shared_bid_net is not None and shared_play_net is not None:
             self.bid_net = shared_bid_net
             self.play_net = shared_play_net
@@ -92,19 +106,38 @@ class LearningSkullKingAgent(SkullKingAgent):
 
     def _process_play_observation(self, observation):
         suit_mapping = {"Parrot": 0, "Treasure Chest": 1, "Treasure Map": 2, "Jolly Roger": 3}
-        hand_vec = process_hand(observation['hand'], self.hand_size, suit_mapping)
+        legal_actions = observation.get("legal_actions", list(range(len(observation['hand']))))
+        hand_vec = process_hand(observation['hand'], self.hand_size, suit_mapping,legal_actions)
         current_trick = observation.get('current_trick', [])
         trick_vec = []
-        if current_trick:
-            ranks = [float(card[1]) for _, card in current_trick if isinstance(card[1], (int, float))]
-            count = len(ranks)
-            avg_rank = np.mean(ranks) if ranks else 0.0
-            max_rank = np.max(ranks) if ranks else 0.0
-        else:
-            count, avg_rank, max_rank = 0, 0.0, 0.0
+        ranks = []
+        for card in current_trick:
+            # One-hot encoding for the suit
+            one_hot = [0, 0, 0, 0]
+            if card[0] in suit_mapping:
+                one_hot[suit_mapping[card[0]]] = 1
+
+            # Convert rank to float and store for statistics
+            try:
+                rank = float(card[1])
+            except (ValueError, TypeError):
+                rank = 0.0
+            ranks.append(rank)
+
+            # Append encoding for this card
+            trick_vec.extend(one_hot + [rank])
+        
+        # Ensure fixed trick size by padding
+        while len(trick_vec) < self.max_players * 5:
+            trick_vec.extend([0] * 5)
+
+        # Compute statistics: count, average rank, max rank
+        count = len(ranks)
+        avg_rank = np.mean(ranks) if ranks else 0.0
+        max_rank = np.max(ranks) if ranks else 0.0
+
+        # Append trick summary statistics
         trick_vec.extend([count, avg_rank, max_rank])
-        while len(trick_vec) < 3:
-            trick_vec.extend([0] * 3)
         personal_bid = observation.get('personal_bid', 0)
         tricks_wincount = observation.get('personnal_tricks_wincount', 0)
         all_bids = observation.get('all_bids', [0] * 10)
