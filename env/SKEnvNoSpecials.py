@@ -9,17 +9,17 @@ class SkullKingEnvNoSpecials(gym.Env):
         super(SkullKingEnvNoSpecials, self).__init__()
         self.num_players = num_players
         self.max_train_players = num_players  # training player count may differ from max supported
-        self.MAX_PLAYERS = 10  # Fixed maximum number of players for observation dims
+        self.max_players = 5  # Fixed maximum number of players for observation dims
         self.round_number = 1
         self.max_rounds = 10
         self.deck = self.create_deck()
         self.hands = [[] for _ in range(num_players)]
-        self.bids = [None] * self.MAX_PLAYERS
-        self.tricks_won = [0] * self.MAX_PLAYERS
+        self.bids = [None] * self.max_players
+        self.tricks_won = [0] * self.max_players
         self.current_trick = []
         self.bidding_phase = True
         self.current_player = 0  # Track the current player
-        self.total_scores = [0] * self.MAX_PLAYERS
+        self.total_scores = [0] * self.max_players
         self.current_winner = -1
         self.winning_card = (-1, -1)
         self.player_0_always_starts = True 
@@ -28,7 +28,6 @@ class SkullKingEnvNoSpecials(gym.Env):
         self.logger = logger
         self.suit_count = 4
         self.max_rank = 14
-        self.max_players = 10  # Fixed maximum number of players for observation dims
         self.hand_size = 10
         self.bid_dimension_vars = ["hand_size", "suit_count", "max_players"]
         self.play_dimension_vars = ["hand_size", "suit_count"]
@@ -118,18 +117,18 @@ class SkullKingEnvNoSpecials(gym.Env):
 
     def _get_observation(self):
         bids = [bid if bid is not None else 0 for bid in self.bids]
-        if len(bids) < self.MAX_PLAYERS:
-            bids_padded = bids + [-1] * (self.MAX_PLAYERS - len(bids))
+        if len(bids) < self.max_players:
+            bids_padded = bids + [-1] * (self.max_players - len(bids))
         else:
-            bids_padded = bids[:self.MAX_PLAYERS]
-        if len(self.tricks_won) < self.MAX_PLAYERS:
-            tricks_won_padded = self.tricks_won + [-1] * (self.MAX_PLAYERS - len(self.tricks_won))
+            bids_padded = bids[:self.max_players]
+        if len(self.tricks_won) < self.max_players:
+            tricks_won_padded = self.tricks_won + [-1] * (self.max_players - len(self.tricks_won))
         else:
-            tricks_won_padded = self.tricks_won[:self.MAX_PLAYERS]
-        if len(self.total_scores) < self.MAX_PLAYERS:
-            total_scores_padded = self.total_scores + [-100000] * (self.MAX_PLAYERS - len(self.total_scores))
+            tricks_won_padded = self.tricks_won[:self.max_players]
+        if len(self.total_scores) < self.max_players:
+            total_scores_padded = self.total_scores + [-100000] * (self.max_players - len(self.total_scores))
         else:
-            total_scores_padded = self.total_scores[:self.MAX_PLAYERS]
+            total_scores_padded = self.total_scores[:self.max_players]
         obs = {
             "player_id": self.current_player,
             "hand": self.hands[self.current_player],
@@ -304,7 +303,7 @@ class SkullKingEnvNoSpecials(gym.Env):
     def _calculate_feature_count(self, feature_vars):
         count = 0
         if "total_scores" in feature_vars:
-            count += self.MAX_PLAYERS  # Padded length
+            count += self.max_players  # Padded length
         if "position_in_order" in feature_vars:
             count += 1
         if "player_id" in feature_vars:
@@ -320,9 +319,9 @@ class SkullKingEnvNoSpecials(gym.Env):
         if "tricks_wincount" in feature_vars:
             count += 1
         if "all_bids" in feature_vars:
-            count += self.MAX_PLAYERS  # Padded length
+            count += self.max_players  # Padded length
         if "all_tricks_won" in feature_vars:
-            count += self.MAX_PLAYERS  # Padded length
+            count += self.max_players  # Padded length
         if "win_one_hot" in feature_vars:
             count += 4
         if "win_rank" in feature_vars:

@@ -55,7 +55,7 @@ class PolicyNetwork(nn.Module):
 class LearningSkullKingAgent(SkullKingAgent):
     def __init__(self, num_players, hand_size=10, learning_rate=1e-3, shared_bid_net=None, shared_play_net=None,
                  shared_trick_win_predictor=None,   # NEW parameter
-                 suit_count=4, max_rank=14, max_players=8, bid_dimension_vars=None, play_dimension_vars=None,
+                 suit_count=4, max_rank=14, max_players=5, bid_dimension_vars=None, play_dimension_vars=None,
                  bid_hidden_dims=None, play_hidden_dims=None):
         super().__init__(num_players)
         self.hand_size = hand_size
@@ -66,8 +66,8 @@ class LearningSkullKingAgent(SkullKingAgent):
         self.play_dimension_vars = play_dimension_vars or []
         self.log_probs = []
         # NEW: Use hardcoded extra features dimensions:
-        bid_input_dim = hand_size * 5 + 14   # 10 from total_scores + 4 extra scalars: position_in_order, player_id, round_number, bidding_phase
-        play_input_dim = hand_size * 5 + self.max_players * 5 +3+ 1 + 1 +10+ 10 +1 +5 +2   # Computed as: hand_vec + 3+40 (trick_vec) +2 ([personal_bid, tricks_wincount]) + 10 +10 + 1 +4 +1+2
+        bid_input_dim = hand_size * 5 + 4 + self.max_players   # 10 from total_scores + 4 extra scalars: position_in_order, player_id, round_number, bidding_phase
+        play_input_dim = hand_size * 5 + self.max_players * 5 +3+ 1 + 1 +self.max_players+ self.max_players +1 +5 +2   # Computed as: hand_vec + 3+40 (trick_vec) +2 ([personal_bid, tricks_wincount]) + 10 +10 + 1 +4 +1+2
         if shared_bid_net is not None and shared_play_net is not None:
             self.bid_net = shared_bid_net
             self.play_net = shared_play_net

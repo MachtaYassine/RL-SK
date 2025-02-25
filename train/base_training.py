@@ -71,7 +71,7 @@ def run_episode(args, env, agents, logger, round_score_loss_coef, double_positiv
                 # POlicy loss, get log_probs
                 log_porbs_for_round = torch.stack(ag.log_probs) # One action for bid and n_round for cards played
                 reward[i]= 2*reward[i] if reward[i]<0 else reward[i] # double positive rewards to Punish more negative rewards
-                round_score_for_agent = 1-reward[i]/(last_round*20)
+                round_score_for_agent = (20-reward[i]/last_round)
                 if round_score_for_agent<0:
                     logger.warning(f"Negative score for agent {i} in round {last_round}, reward {reward[i]} and last_round {last_round}")
                 #if the log probs are positive also warn:
@@ -84,10 +84,10 @@ def run_episode(args, env, agents, logger, round_score_loss_coef, double_positiv
                 logger.info(
                     f"Agent {i}: Actual tricks won {actual_tricks} | "
                     f"Bid prediction distribution: {np.array2string(bid_input.detach().cpu().numpy(), formatter={'float_kind': lambda x: f'{x:.1e}'})} | "
-                    f"Bid loss: {bid_loss.item():.1e} || "
+                    f"Bid loss: {bid_loss.item():.2e} || "
                     f"Play head prediction distribution (mean): {np.array2string(torch.mean(predictions, dim=0).detach().cpu().numpy(), formatter={'float_kind': lambda x: f'{x:.1e}'})} | "
-                    f"Play head loss: {play_head_loss.item():.1e} | "
-                    f"Policy loss: {policy_loss.item():.1e}",
+                    f"Play head loss: {play_head_loss.item():.2e} | "
+                    f"Policy loss: {policy_loss.item():.2e} round_score: {round_score_for_agent}",
                     color="blue"
                 )
 
