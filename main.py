@@ -194,8 +194,40 @@ def main():
             # Each episode we sample a random number of players and rounds.
             n_players = random.randint(2, 5)
             n_rounds = random.randint(1, 10)
-            rebel_agent.train(n_players, n_rounds)
+            _, policy_network_loss, _ = rebel_agent.train(n_players, n_rounds)
+            agent_losses[0].extend(policy_network_loss)
             # Save the model weights for the other agents to use.
+            # Find all other rebel agents
+            other_rebel_agents = [agent for i, agent in enumerate(agents) 
+                                if args.agent_types[i] == "rebel" and agent != rebel_agent]
+            
+            # Copy network weights to other agents
+            for other_agent in other_rebel_agents:
+                # Copy bidding network weights
+                other_agent.bidding_network.load_state_dict(
+                    rebel_agent.bidding_network.state_dict()
+                )
+                # Copy policy network weights 
+                other_agent.policy_network.load_state_dict(
+                    rebel_agent.policy_network.state_dict()
+                )
+            obs = env.reset()
+            done = False
+            episode_rewards = [0] * args.num_players
+            while not done:
+                current_player = env.current_player
+                agent = agents[current_player]
+                logger.debug(f"Player {current_player}'s turn. Using step_with_agent.", color="cyan")
+                obs, reward, done, _ = env.step_with_agent(agent)
+                # Summing rewards if reward is a list (trick/reward per agent) or single value.
+                if isinstance(reward, list):
+                    episode_rewards = [er + r for er, r in zip(episode_rewards, reward)]
+                else:
+                    episode_rewards[current_player] += reward
+            # Record per-agent rewards.
+            for i in range(args.num_players):
+                agent_rewards[i].append(episode_rewards[i])
+            
             
         else:
             obs = env.reset()

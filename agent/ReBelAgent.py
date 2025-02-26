@@ -108,6 +108,8 @@ class ReBelValueNN(nn.Module):
         dataset = TupleDataset(training_dict)
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
         self.train()
+        total_loss = 0.0
+        samples = 0
         for _ in range(epochs):
             for pbs, set_of_hands, targets in dataloader:
                 pbs = pbs.to(device)
@@ -118,8 +120,11 @@ class ReBelValueNN(nn.Module):
                 loss = self.loss_fn(outputs, targets)
                 loss.backward()
                 self.optimizer.step()
+                total_loss += loss.item() * pbs.size(0)
+                samples += pbs.size(0)
         self.to("cpu")
         self.eval()
+        return total_loss / samples if samples > 0 else 0
 
 
 class ReBelPolicyNN(nn.Module):
@@ -232,6 +237,8 @@ class ReBelPolicyNN(nn.Module):
         dataset = TupleDataset(training_dict)
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
         self.train()
+        total_loss = 0.0
+        samples = 0
         for _ in range(epochs):
             for pbs, hand, probas in dataloader:
                 pbs = pbs.to(device)
@@ -242,8 +249,11 @@ class ReBelPolicyNN(nn.Module):
                 loss = self.loss_fn(outputs, probas)
                 loss.backward()
                 self.optimizer.step()
+                total_loss += loss.item() * pbs.size(0)
+                samples += pbs.size(0)
         self.to("cpu")
         self.eval()
+        return total_loss / samples if samples > 0 else 0
 
 
 class ReBelBidNN(nn.Module):
@@ -318,6 +328,8 @@ class ReBelBidNN(nn.Module):
         dataset = TupleDataset(processed_training_dict)
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
         self.train()
+        total_loss = 0.0
+        samples = 0
         for _ in range(epochs):
             for hand, _, bid in dataloader:
                 hand = hand.to(device)
@@ -327,8 +339,11 @@ class ReBelBidNN(nn.Module):
                 loss = self.loss_fn(outputs.view(-1), bid)
                 loss.backward()
                 self.optimizer.step()
+                total_loss += loss.item() * hand.size(0)
+                samples += hand.size(0)
         self.to("cpu")
         self.eval()
+        return total_loss / samples if samples > 0 else 0
 
 
 class ReBel:
@@ -377,6 +392,8 @@ class ReBel:
 
     def train(self):
         """Main training loop implementing the ReBel algorithm."""
+        # Initiate lists for the losses
+        value_network_loss, policy_network_loss, bidding_network_loss = [], [], []
         # We start by sampling K sets of hands from the deck
         sets_of_hands = self.get_sets_of_hands()
         bidding_network_training_dict = {}
@@ -451,19 +468,23 @@ class ReBel:
                                         continue
                             policy_network_training_dict[(state, torch.tensor(player_hand, dtype=torch.float32))] = probas
                         pbs = new_pbs
-            self.value_network.train_model(
+            v_loss = self.value_network.train_model(
                 value_network_training_dict
             )  # Update value network
-            self.policy_network.train_model(
+            value_network_loss.append(v_loss)
+            p_loss = self.policy_network.train_model(
                 policy_network_training_dict
             )  # Update policy network
+            policy_network_loss.append(p_loss)
             self.warm_start = True if np.random.rand() > 0.5 else False
             bidding_network_training_dict[torch.tensor(set_of_hands, dtype=torch.float32)] = self._get_average_tricks_won(
                 value_network_training_dict
             )
-        self.bidding_network.train_model(
+        b_loss = self.bidding_network.train_model(
             bidding_network_training_dict
         )  # Update bidding network
+        bidding_network_loss.append(b_loss)
+        return value_network_loss, policy_network_loss, bidding_network_loss
 
     def get_sets_of_hands(self):
         """
@@ -965,7 +986,7 @@ class ReBelSkullKingAgent(SkullKingAgent):
         self.bidding_network = ReBelBidNN()
         self.value_network = ReBelValueNN()
 
-    def train(self, n_players=5, n_rounds=10, K=20, N=10, T=50, simu_depth=1):
+    def train(self, n_players=5, n_rounds=10, K=2, N=2, T=2, simu_depth=1):
         """
         Train the agent using the ReBel algorithm with vectorized cards.
 
@@ -1003,7 +1024,8 @@ class ReBelSkullKingAgent(SkullKingAgent):
         )
 
         # Train networks
-        rebel.train()
+        value_network_loss, policy_network_loss, bidding_network_loss = rebel.train()
+        return value_network_loss, policy_network_loss, bidding_network_loss
 
     def _process_observation(self, observation):
         """Convert observation into tensor format for ReBel networks with finalized inputs."""
