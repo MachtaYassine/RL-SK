@@ -64,8 +64,7 @@ class SkullKingEnvNoSpecials(gym.Env):
         self.current_player = 0
         self.total_scores = [0] * self.num_players  # NEW: reset total scores at game start
         obs = self._get_observation()
-        logger.debug(f"Environment reset: round={self.round_number}, hand={self.hands[self.current_player]}, current_trick={self.current_trick}",
-                     color="magenta")
+        logger.debug(f"Environment reset: round={self.round_number}, hand={self.hands[self.current_player]}, current_trick={self.current_trick}")
         return obs
     
     def _update_current_trick_winner(self, latest_player, latest_card):
@@ -106,23 +105,23 @@ class SkullKingEnvNoSpecials(gym.Env):
         return obs
 
     def _process_bidding_step(self, action):
-        logger.debug(f"Bidding phase: player {self.current_player} bids {action}", color="green")
+        logger.debug(f"Bidding phase: player {self.current_player} bids {action}")
         self.bids[self.current_player] = action
         self.current_player = (self.current_player + 1) % self.num_players
         if all(b is not None for b in self.bids):
             self.bidding_phase = False
             # Now selecting a card, so change the action space accordingly.
             self.action_space = spaces.Discrete(len(self.hands[0]))
-            logger.debug("All bids received. Transitioning to play phase.", color="green")
+            logger.debug("All bids received. Transitioning to play phase.")
         obs = self._get_observation()
-        logger.debug(f"Observation after bidding: {obs}", color="magenta")
+        logger.debug(f"Observation after bidding: {obs}")
         return obs, 0, False, {}
 
     def _process_play_step(self, action):
-        logger.debug(f"Play phase: player {self.current_player} action {action}", color="green")
+        logger.debug(f"Play phase: player {self.current_player} action {action}")
         played_card = self.hands[self.current_player].pop(action)
         self.current_trick.append((self.current_player, played_card))
-        logger.debug(f"Updated current trick: {self.current_trick}", color="magenta")
+        logger.debug(f"Updated current trick: {self.current_trick}")
 
         # Update winning info.
         if len(self.current_trick) == 1:
@@ -136,7 +135,7 @@ class SkullKingEnvNoSpecials(gym.Env):
         if len(self.current_trick) == self.num_players:
             winner = self.resolve_trick()
             self.tricks_won[winner] += 1
-            logger.debug(f"Trick complete. Winner: player {winner} with trick: {self.current_trick}", color="green")
+            logger.debug(f"Trick complete. Winner: player {winner} with trick: {self.current_trick}")
             self.current_trick = []
             self.current_winner = -1
             self.winning_card = (-1, -1)
@@ -154,11 +153,11 @@ class SkullKingEnvNoSpecials(gym.Env):
                     return self._get_observation(), round_rewards, done, {}
             # The hands are not empty, so continue playing.
             rewards = self.calculate_reward()
-            logger.debug(f"Rewards: {rewards}, done: False", color="magenta")
+            logger.debug(f"Rewards: {rewards}, done: False")
             return self._get_observation(), rewards, False, {}
         # Trick not complete, continue playing.
         obs = self._get_observation()
-        logger.debug(f"Observation after play action: {obs}", color="yellow")
+        logger.debug(f"Observation after play action: {obs}")
         return obs, [0] * self.num_players, False, {}
 
     def step(self, action):

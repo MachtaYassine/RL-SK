@@ -81,6 +81,7 @@ AGENT_CLASSES = {
     "learning": "agent.NeuralAgent.LearningSkullKingAgent",
     "intermediate": "agent.IntermediateAgent.IntermediateSkullKingAgent",
     "agressive": "agent.AgressiveAgent.AggressiveSkullKingAgent",
+    "rebel": "agent.ReBelAgent.ReBelSkullKingAgent",
 }
 
 ENVIORNMENT_CLASSES = {
@@ -114,7 +115,7 @@ def parse_args():
     parser.add_argument("--learning_rate", type=float, default=1e-3,
                         help="Learning rate for learning agents")
     parser.add_argument("--agent_types", nargs="+", default=["learning", "simple", "simple"],
-                        help="List of agent types (simple or learning) for each player")
+                        help="List of agent types (simple, learning) for each player")
     # New argument for reproducible experiments.
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging for full episode tracing")  
@@ -186,51 +187,62 @@ def main():
 
     for episode in range(args.num_episodes):
         logger.debug(f"=== Episode {episode+1} start ===", color="magenta")
-        obs = env.reset()
-        done = False
-        episode_rewards = [0] * args.num_players
 
-        while not done:
-            current_player = env.current_player
-            agent = agents[current_player]
-            logger.debug(f"Player {current_player}'s turn. Using step_with_agent.", color="cyan")
-            obs, reward, done, _ = env.step_with_agent(agent)
-            # Summing rewards if reward is a list (trick/reward per agent) or single value.
-            if isinstance(reward, list):
-                episode_rewards = [er + r for er, r in zip(episode_rewards, reward)]
-            else:
-                episode_rewards[current_player] += reward
+        if "rebel" in args.agent_types:
+            # Train RebelAgent with its own training loop and the others will inherit the weights from its models.
+            rebel_agent = agents[args.agent_types.index("rebel")]
+            # Each episode we sample a random number of players and rounds.
+            n_players = random.randint(2, 5)
+            n_rounds = random.randint(1, 10)
+            rebel_agent.train(n_players, n_rounds)
+            # Save the model weights for the other agents to use.
+            
+        else:
+            obs = env.reset()
+            done = False
+            episode_rewards = [0] * args.num_players
 
-        logger.debug("Episode complete. Updating learning agents if applicable.", color="blue")
-        # NEW: Update learning agents and record their loss; if multiple updates occur, average per episode.
-        for i, agent in enumerate(agents):
-            if hasattr(agent, "optimizer_bid") and agent.log_probs:
-                R = 0
-                agent_policy_losses = []
-                for log_prob in reversed(agent.log_probs):
-                    R = 1 + 0.99 * R  # placeholder for return
-                    agent_policy_losses.insert(0, -log_prob * R)
-                loss = torch.stack(agent_policy_losses).sum()
-                agent.optimizer_bid.zero_grad()
-                agent.optimizer_play.zero_grad()
-                loss.backward()
-                agent.optimizer_bid.step()
-                agent.optimizer_play.step()
-                logger.debug(f"Player {i} updated with loss: {loss.item()}")
-                agent.log_probs.clear()
-                # Record loss into agent_losses for learning agents.
-                agent_losses[i].append(loss.item())
-            else:
-                # For non-learning agents, add a dummy value (or skip).
-                agent_losses[i].append(None)
-        # Record per-agent rewards.
-        for i in range(args.num_players):
-            agent_rewards[i].append(episode_rewards[i])
-            # NEW: Log per-agent reward and loss in TensorBoard:
-            if writer:
-                writer.add_scalar(f"Agent_{i}/Reward", episode_rewards[i], episode)
-                if agent_losses[i][-1] is not None:
-                    writer.add_scalar(f"Agent_{i}/Loss", agent_losses[i][-1], episode)
+            while not done:
+                current_player = env.current_player
+                agent = agents[current_player]
+                logger.debug(f"Player {current_player}'s turn. Using step_with_agent.", color="cyan")
+                obs, reward, done, _ = env.step_with_agent(agent)
+                # Summing rewards if reward is a list (trick/reward per agent) or single value.
+                if isinstance(reward, list):
+                    episode_rewards = [er + r for er, r in zip(episode_rewards, reward)]
+                else:
+                    episode_rewards[current_player] += reward
+
+            logger.debug("Episode complete. Updating learning agents if applicable.", color="blue")
+            # NEW: Update learning agents and record their loss; if multiple updates occur, average per episode.
+            for i, agent in enumerate(agents):
+                if hasattr(agent, "optimizer_bid") and agent.log_probs:
+                    R = 0
+                    agent_policy_losses = []
+                    for log_prob in reversed(agent.log_probs):
+                        R = 1 + 0.99 * R  # placeholder for return
+                        agent_policy_losses.insert(0, -log_prob * R)
+                    loss = torch.stack(agent_policy_losses).sum()
+                    agent.optimizer_bid.zero_grad()
+                    agent.optimizer_play.zero_grad()
+                    loss.backward()
+                    agent.optimizer_bid.step()
+                    agent.optimizer_play.step()
+                    logger.debug(f"Player {i} updated with loss: {loss.item()}")
+                    agent.log_probs.clear()
+                    # Record loss into agent_losses for learning agents.
+                    agent_losses[i].append(loss.item())
+                else:
+                    # For non-learning agents, add a dummy value (or skip).
+                    agent_losses[i].append(None)
+            # Record per-agent rewards.
+            for i in range(args.num_players):
+                agent_rewards[i].append(episode_rewards[i])
+                # NEW: Log per-agent reward and loss in TensorBoard:
+                if writer:
+                    writer.add_scalar(f"Agent_{i}/Reward", episode_rewards[i], episode)
+                    if agent_losses[i][-1] is not None:
+                        writer.add_scalar(f"Agent_{i}/Loss", agent_losses[i][-1], episode)
         
         
         logger.info(f"--- Episode {episode+1} complete ---", color="green")
@@ -240,7 +252,11 @@ def main():
     if writer:
         writer.close()
 
-    
+    # Update agents' internal number of players to include the human player.
+    total_players = len(agents) + 1  # new total players including human
+    for agent in agents:
+        agent.num_players = total_players
+
     plt.figure(figsize=(10, 5))
     for i in range(args.num_players):
         plt.plot(agent_rewards[i], label=f"Agent {i} Reward")
