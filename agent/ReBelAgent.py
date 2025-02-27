@@ -9,6 +9,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm  # NEW: progress bar
+from joblib import Parallel, delayed  # NEW: joblib for parallel processing
 
 
 class TupleDataset(Dataset):
@@ -95,11 +96,15 @@ class ReBelValueNN(nn.Module):
             (padded_pbs.view(batch_size, -1), padded_hands.view(batch_size, -1)), dim=1
         ) # Shape: (batch_size, input_dim)
 
-        # Forward pass through the network
+        # Apply first linear layer
         x = F.relu(self.fc1(x))
+        # Apply second linear layer
         x = F.relu(self.fc2(x))
         x = self.fc3(x)
-        # TODO : Maybe will need to set the extra values to zero, we'll see
+        # Set the extra values to zero
+        value_mask = torch.full((batch_size, self.max_players), 1.0).to(device)
+        value_mask[:, n_players:] = 0.0
+        x = x * value_mask
         return x  # Shape: (1, max_players)
 
     def train_model(self, training_dict, epochs=10, batch_size=32):
@@ -164,13 +169,12 @@ class ReBelPolicyNN(nn.Module):
         ) # bid + pbs + hand
         self.output_dim = self.max_rounds  # Probabilities over each card in hand (10)
 
-        # Define a feedforward network
         self.fc1 = nn.Linear(self.input_dim, self.hidden_dim)
         self.fc2 = nn.Linear(self.hidden_dim, self.hidden_dim // 2)
         self.fc3 = nn.Linear(self.hidden_dim // 2, self.output_dim)
 
         self.optimizer = torch.optim.Adam(self.parameters(), lr=lr)
-        self.loss_fn = nn.CrossEntropyLoss()
+        self.loss_fn = nn.MSELoss()
 
     def forward(self, pbs, hand, device="cpu"):
         """
@@ -197,37 +201,15 @@ class ReBelPolicyNN(nn.Module):
         x = torch.cat(
             (padded_pbs.view(batch_size, -1), padded_hand.view(batch_size, -1)), dim=1
         )
-        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc1(x))  
         x = F.relu(self.fc2(x))
         x = self.fc3(x)
+        x = F.relu(x)  # Ensure the output is non-negative
         # Compute raw probabilities using softmax
-        card_mask = torch.full((batch_size, self.max_rounds), 1.0).to(device)
-        card_mask[n_rounds:] = 0.0  # Mask the last rounds
-        x = x * card_mask
-        probs = F.softmax(x, dim=0)  # shape: (max_rounds,)
-        
-        # # ----- NEW MASKING SECTION -----
-        # # Assume batch_size == 1 and that the hand corresponds to player 0.
-        # # Extract played cards for that player from pbs (rows 1 onward)
-        # played_cards = padded_pbs[0, 1: n_rounds+1, 0, :]  # shape: (n_rounds, card_dim)
-        # hand_cards = padded_hand[0, :n_rounds, :]           # shape: (n_rounds, card_dim)
-        # available_mask = torch.ones(hand_cards.size(0), device=device)
-        # for i in range(hand_cards.size(0)):
-        #     for j in range(played_cards.size(0)):
-        #         # Only consider valid played cards (those not equal to -1)
-        #         if (played_cards[j] != -1).all() and torch.all(hand_cards[i] == played_cards[j]):
-        #             available_mask[i] = 0
-        #             break
-        # # Apply mask: set probabilities for unavailable cards to zero.
-        # probs = probs * available_mask
-        # # Force negatives or nan values to zero
-        # probs[probs < 0] = 0
-        # probs[torch.isnan(probs)] = 0
-        # # Renormalize if any probability is available
-        # total = probs.sum()
-        # if total > 0:
-        #     probs = probs / total
-        # # ----- END NEW MASKING SECTION -----
+        card_mask = torch.full((batch_size, self.max_rounds), 0.0).to(device)
+        card_mask[:, n_rounds:] = float("-inf") # Mask the last rounds
+        x = x + card_mask
+        probs = F.softmax(x, dim=-1)  # shape: (max_rounds,)
         
         return probs  # Final probability distribution over the hand
 
@@ -284,7 +266,7 @@ class ReBelBidNN(nn.Module):
         self.hidden_dim = hidden_dim
         self.card_dim = card_dim
 
-        # Define the feedforward network
+        # Define the feedforward network with BatchNorm layers
         self.fc1 = nn.Linear(self.input_dim, self.hidden_dim)
         self.fc2 = nn.Linear(self.hidden_dim, self.hidden_dim // 2)
         self.fc3 = nn.Linear(self.hidden_dim // 2, 1)  # Output is a single value
@@ -390,100 +372,100 @@ class ReBel:
         self.simu_depth = simu_depth
         self.warm_start = warm_start
 
+    def _process_pbs_worker(self, args_tuple):
+        pbs, bids, set_of_hands, T = args_tuple
+        original_pbs = pbs.clone()
+        local_policy_training = {}
+        local_value_training = {}
+        import networkx as nx  # ensure nx is imported here
+        
+        # If initial pbs is terminal, compute expected_value on a trivial graph.
+        if self._is_terminal(pbs):
+            G = nx.DiGraph()
+            G.add_node(pbs)
+            expected_value = self._get_expected_value(G, bids, set_of_hands)
+            local_value_training[(original_pbs, torch.tensor(set_of_hands, dtype=torch.float32))] = expected_value
+            return local_value_training, local_policy_training
+
+        while not self._is_terminal(pbs):
+            G = self._initialize_tree(pbs, set_of_hands)
+            rolling_mean_policy = G.copy()
+            expected_value = self._get_expected_value(G, bids, set_of_hands)
+            t_sample = np.random.choice(
+                np.arange(T),
+                p=np.linspace(0.1, 1, T) / np.sum(np.linspace(0.1, 1, T))
+            )
+            for t in range(T):
+                if t == t_sample:
+                    new_pbs = self._sample_leaf(G)
+                G = self._update_policy(G, set_of_hands)
+                for u, v in rolling_mean_policy.edges():
+                    old = rolling_mean_policy[u][v]["weight"]
+                    new = G[u][v]["weight"] if G.has_edge(u, v) else old
+                    rolling_mean_policy[u][v]["weight"] = (t/(t+1))*old + (1/(t+1))*new
+                expected_value = (t/(t+1))*expected_value + (1/(t+1))*self._get_expected_value(G, bids, set_of_hands)
+            for state in list(rolling_mean_policy.nodes):
+                mask = state[1:] == -1
+                succesors = list(rolling_mean_policy.successors(state))
+                if len(succesors) > 0:
+                    player = torch.nonzero(mask, as_tuple=False)[0][1].item()
+                    player_hand = set_of_hands[player]
+                    probas = torch.full((self.value_network.max_rounds,), 0.0)
+                    for child in succesors:
+                        child_state = torch.tensor(child)
+                        diff = (child_state[1:, player] != state[1:, player])
+                        indices = torch.nonzero(diff, as_tuple=False)
+                        if len(indices) > 0:
+                            try:
+                                trick_i = indices[0][0].item() + 1
+                                card_played = child_state[trick_i, player].tolist()
+                                idx = player_hand.index(card_played)
+                                weight = rolling_mean_policy[state][child]["weight"]
+                                probas[idx] = weight
+                            except ValueError:
+                                continue
+                    if torch.sum(probas) == 0:
+                        print("No legal moves")
+                        continue
+                    local_policy_training[(state, torch.tensor(player_hand, dtype=torch.float32))] = probas
+            pbs = new_pbs
+        local_value_training[(original_pbs, torch.tensor(set_of_hands, dtype=torch.float32))] = expected_value
+        return local_value_training, local_policy_training
+
     def train(self):
         """Main training loop implementing the ReBel algorithm."""
-        # Initiate lists for the losses
         value_network_loss, policy_network_loss, bidding_network_loss = [], [], []
-        # We start by sampling K sets of hands from the deck
         sets_of_hands = self.get_sets_of_hands()
         bidding_network_training_dict = {}
-        # Set all the networks to evaluation mode
         self.value_network.eval()
         self.policy_network.eval()
         self.bidding_network.eval()
+        # Process each set_of_hands sequentially as before
         for set_of_hands in tqdm(sets_of_hands, desc="Set of Hands"):
-            # Get bid of each player
             bids = self.get_bids(set_of_hands)
-            # Sample N public states at random from the hands as a starting point
             set_of_pbs = self.get_initial_pbs(set_of_hands, bids)
-            value_network_training_dict, policy_network_training_dict = {}, {}
-
-            # Now iterate through these public states and run the ReBel algorithm
-            with torch.no_grad():
-                for pbs in tqdm(set_of_pbs, desc="PBS states", leave=False):
-                    # Begin iterative exploration until reaching the end of the game
-                    while not self._is_terminal(pbs):
-                        # Get the exploration tree
-                        G = self._initialize_tree(pbs, set_of_hands)
-                        rolling_mean_policy = (
-                            G.copy()
-                        )  # We will update the weights on this graph as a way of representing a policy
-                        # Initial value associated to the pbs
-                        expected_value = self._get_expected_value(G, bids, set_of_hands)
-                        # Sample a timestep `t_sample` with increasing probability
-                        t_sample = np.random.choice(
-                            np.arange(self.T),
-                            p=np.linspace(0.1, 1, self.T)
-                            / np.sum(np.linspace(0.1, 1, self.T)),
-                        )
-                        for t in tqdm(range(self.T), desc="Time steps", leave=False):
-                            if t == t_sample:
-                                new_pbs = self._sample_leaf(G)
-                            G = self._update_policy(
-                                G, set_of_hands
-                            )  # Weights now represent \pi^{t}
-                            for u, v in rolling_mean_policy.edges():
-                                old = rolling_mean_policy[u][v]["weight"]
-                                new = G[u][v]["weight"] if G.has_edge(u, v) else old
-                                rolling_mean_policy[u][v]["weight"] = (t/(t+1))*old + (1/(t+1))*new
-                            expected_value = (t / (t + 1)) * expected_value + (
-                                1 / (t + 1)
-                            ) * self._get_expected_value(
-                                G, bids, set_of_hands
-                            )  # Update expected value
-                        value_network_training_dict[(pbs, torch.tensor(set_of_hands, dtype=torch.float32))] = expected_value
-                        for state in list(rolling_mean_policy.nodes):
-                            # Find the player with the first -1 in pbs after bids.
-                            mask = pbs[1:] == -1
-                            player = torch.nonzero(mask, as_tuple=False)[0][1].item()  # first -1 in player column
-                            player_hand = set_of_hands[player]  # assumed to be a list of cards (each card as list)
-                            # Create a probability vector over the player's hand.
-                            probas = torch.full((self.value_network.max_rounds,), 0.0)
-                            # Iterate over successors of pbs.
-                            for child in G.successors(pbs):
-                                child_state = torch.tensor(child)
-                                # Find the trick index where the parent's pbs is -1 but child's state is not.
-                                # We consider rows starting from index 1 (ignoring bids row).
-                                diff = (child_state[1:, player] != pbs[1:, player])
-                                indices = torch.nonzero(diff, as_tuple=False)
-                                if len(indices) > 0:
-                                    trick_i = indices[0][0].item() + 1  # add 1 to adjust index offset
-                                    card_played = child_state[trick_i, player].tolist()
-                                    try:
-                                        idx = player_hand.index(card_played)
-                                        weight = G[pbs][child]["weight"]
-                                        probas[idx] = weight
-                                    except ValueError:
-                                        # If the card is not found, skip it.
-                                        continue
-                            policy_network_training_dict[(state, torch.tensor(player_hand, dtype=torch.float32))] = probas
-                        pbs = new_pbs
-            v_loss = self.value_network.train_model(
-                value_network_training_dict
-            )  # Update value network
-            value_network_loss.append(v_loss)
-            p_loss = self.policy_network.train_model(
-                policy_network_training_dict
-            )  # Update policy network
-            policy_network_loss.append(p_loss)
+            value_network_training_dict_local = {}
+            policy_network_training_dict_local = {}
+            args_list = [(pbs, bids, set_of_hands, self.T) for pbs in set_of_pbs]
+            with Parallel(n_jobs=-1) as parallel:
+                results = parallel(delayed(self._process_pbs_worker)(args) for args in args_list)
+            # Merge joblib results.
+            for v_dict, p_dict in results:
+                value_network_training_dict_local.update(v_dict)
+                policy_network_training_dict_local.update(p_dict)
+            value_network_loss.append(
+                self.value_network.train_model(value_network_training_dict_local)
+            )
+            policy_network_loss.append(
+                self.policy_network.train_model(policy_network_training_dict_local)
+            )
             self.warm_start = True if np.random.rand() > 0.5 else False
             bidding_network_training_dict[torch.tensor(set_of_hands, dtype=torch.float32)] = self._get_average_tricks_won(
-                value_network_training_dict
+                value_network_training_dict_local
             )
-        b_loss = self.bidding_network.train_model(
-            bidding_network_training_dict
-        )  # Update bidding network
-        bidding_network_loss.append(b_loss)
+        bidding_network_loss.append(
+            self.bidding_network.train_model(bidding_network_training_dict)
+        )
         return value_network_loss, policy_network_loss, bidding_network_loss
 
     def get_sets_of_hands(self):
@@ -678,6 +660,16 @@ class ReBel:
                         proba = (
                             self.policy_network(current_pbs.unsqueeze(0), hand_tensor).squeeze(0)
                         )
+                        # Recompute softmax over legal moves
+                        legal_indices = []
+                        for card in current_hand:
+                            card = torch.tensor(card)
+                            card_idx = torch.where((hand_tensor[0, :] == card).all(dim=-1))[0][0].item()
+                            legal_indices.append(card_idx)
+                        legal_mask = torch.full(proba.size(), float("-inf"))
+                        legal_mask[legal_indices] = 0.0
+                        proba = F.softmax(proba + legal_mask, dim=-1)
+                        proba = proba[legal_indices]
                     else:
                         proba = torch.full((len(current_hand),), 1 / len(current_hand))
 
@@ -894,7 +886,7 @@ class ReBel:
             # Get all edges from parent with stored regrets.
             parent_edges = [(parent, child) for child in G.successors(parent)]
             total_regret = sum(G[parent][child].get("regret", 0) for _, child in parent_edges)
-            if total_regret > 0:
+            if total_regret > 0 and np.random.rand() > 0.25:
                 for _, child in parent_edges:
                     G[parent][child]["weight"] = G[parent][child]["regret"] / total_regret
             else:
@@ -962,7 +954,7 @@ class ReBel:
                 torch.abs(value[(value < 0) & (value != -10 * self.n_rounds)]) / 10
             )  # If negative but not -10 * self.n_rounds, divide by -10
             tricks_won[value == -10 * self.n_rounds] = (
-                1  # If exactly -10 * self.n_rounds, player bid 0 but won at least 1 trick
+                self.n_rounds  # If exactly -10 * self.n_rounds, player bid 0 but won at most n_rounds trick
             )
 
             total_tricks += tricks_won  # Accumulate tricks won
@@ -986,7 +978,7 @@ class ReBelSkullKingAgent(SkullKingAgent):
         self.bidding_network = ReBelBidNN()
         self.value_network = ReBelValueNN()
 
-    def train(self, n_players=5, n_rounds=10, K=2, N=2, T=2, simu_depth=1):
+    def train(self, n_players=5, n_rounds=10, K=5, N=5, T=10, simu_depth=1):
         """
         Train the agent using the ReBel algorithm with vectorized cards.
 
@@ -1073,6 +1065,8 @@ class ReBelSkullKingAgent(SkullKingAgent):
 
     def bid(self, observation):
         """Use ReBel bidding network to determine bid using finalized input shape."""
+        self.policy_network.eval()
+        self.bidding_network.eval()
         hand_tensor = self._process_observation(observation)  # shape: (1, hand_len, 4)
         with torch.no_grad():
             bid_output = self.bidding_network(hand_tensor)
@@ -1081,6 +1075,8 @@ class ReBelSkullKingAgent(SkullKingAgent):
 
     def play_card(self, observation):
         """Use ReBel policy network to determine which card to play with finalized input."""
+        self.policy_network.eval()
+        self.bidding_network.eval()
         pbs, hand_tensor = self._process_observation(observation)  # pbs: (1, rounds+1, num_players, 4) and hand: (1, rounds, 4)
         with torch.no_grad():
             probs = self.policy_network(pbs, hand_tensor)
@@ -1091,6 +1087,7 @@ class ReBelSkullKingAgent(SkullKingAgent):
             return np.random.randint(hand_len)
         action = torch.multinomial(probs, 1).item()
         return action
+
 
     def act(self, observation, bidding_phase):
         """Main action selection method"""

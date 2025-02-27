@@ -12,6 +12,7 @@ import socketserver            # NEW: for live server
 from torch.utils.tensorboard import SummaryWriter  # NEW: for TensorBoard logging
 from env.SKEnvNoSpecials import SkullKingEnvNoSpecials
 from agent.HumanAgent import HumanAgent
+import pickle  # NEW: for saving pickle files
 
 # Define a custom logger that accepts a "color" parameter, which can be a name.
 class CustomLogger(logging.Logger):
@@ -127,6 +128,10 @@ def parse_args():
 def main():
     args = parse_args()
 
+    # NEW: Initialize lists to record value network loss and bidding loss.
+    value_net_losses = []
+    bidding_losses = []
+
     # Initialize TensorBoard SummaryWriter if enabled.
     writer = None
     if args.enable_tensorboard:
@@ -187,30 +192,21 @@ def main():
 
     for episode in range(args.num_episodes):
         logger.debug(f"=== Episode {episode+1} start ===", color="magenta")
-
+        
         if "rebel" in args.agent_types:
-            # Train RebelAgent with its own training loop and the others will inherit the weights from its models.
             rebel_agent = agents[args.agent_types.index("rebel")]
-            # Each episode we sample a random number of players and rounds.
             n_players = random.randint(2, 5)
             n_rounds = random.randint(1, 10)
-            _, policy_network_loss, _ = rebel_agent.train(n_players, n_rounds)
-            agent_losses[0].extend(policy_network_loss)
-            # Save the model weights for the other agents to use.
-            # Find all other rebel agents
-            other_rebel_agents = [agent for i, agent in enumerate(agents) 
-                                if args.agent_types[i] == "rebel" and agent != rebel_agent]
-            
-            # Copy network weights to other agents
+            value_loss, policy_loss, bidding_loss = rebel_agent.train(n_players, n_rounds)
+            # Record losses from rebel training.
+            agent_losses[0].extend(policy_loss)
+            value_net_losses.extend(value_loss)
+            bidding_losses.extend(bidding_loss)
+            # NEW: Copy network weights to other rebel agents.
+            other_rebel_agents = [agent for i, agent in enumerate(agents) if args.agent_types[i]=="rebel" and agent != rebel_agent]
             for other_agent in other_rebel_agents:
-                # Copy bidding network weights
-                other_agent.bidding_network.load_state_dict(
-                    rebel_agent.bidding_network.state_dict()
-                )
-                # Copy policy network weights 
-                other_agent.policy_network.load_state_dict(
-                    rebel_agent.policy_network.state_dict()
-                )
+                other_agent.bidding_network.load_state_dict(rebel_agent.bidding_network.state_dict())
+                other_agent.policy_network.load_state_dict(rebel_agent.policy_network.state_dict())
             obs = env.reset()
             done = False
             episode_rewards = [0] * args.num_players
@@ -278,8 +274,30 @@ def main():
         
         
         logger.info(f"--- Episode {episode+1} complete ---", color="green")
+        # Save networks every 5 episodes
+        if (episode + 1) % 5 == 0:
+            for idx, agent_type in enumerate(args.agent_types):
+                if agent_type == "rebel":
+                    torch.save(
+                        agents[idx].policy_network.state_dict(),
+                        os.path.join(logs_dir, f"policy_net_episode_{episode+1}.pth.tar")
+                    )
+                    torch.save(
+                        agents[idx].value_network.state_dict(),
+                        os.path.join(logs_dir, f"value_net_episode_{episode+1}.pth.tar")
+                    )
+                    torch.save(
+                        agents[idx].bidding_network.state_dict(),
+                        os.path.join(logs_dir, f"bidding_net_episode_{episode+1}.pth.tar")
+                    )
 
     logger.info("Training complete.", color="green")
+
+    # NEW: Save loss lists to pickle files in logs_dir.
+    with open(os.path.join(logs_dir, "value_net_losses.pkl"), "wb") as f:
+        pickle.dump(value_net_losses, f)
+    with open(os.path.join(logs_dir, "bidding_losses.pkl"), "wb") as f:
+        pickle.dump(bidding_losses, f)
 
     if writer:
         writer.close()
