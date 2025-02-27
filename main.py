@@ -309,6 +309,10 @@ def run_interactive(args, agents, logger):
     if play_again.lower() == 'y':
         run_interactive(args, agents, logger)
 
+
+def run_evaluation(args, agents, logger):
+    
+
 def main():
     torch.autograd.set_detect_anomaly(True)  # Enable anomaly detection
     args = parse_args()
@@ -366,6 +370,17 @@ def main():
         writer.close()
 
     run_plots(logs_dir, agent_rewards, agent_losses, args.num_players)
+
+    # Save the agents' shared networks if they exist. in the logs directory.
+    if args.shared_networks:
+        for agent in agents:
+            if hasattr(agent, 'bid_net'):
+                torch.save(agent.bid_net.state_dict(), os.path.join(logs_dir, f"{agent.__class__.__name__}_bid_net.pth"))
+                torch.save(agent.play_net.state_dict(), os.path.join(logs_dir, f"{agent.__class__.__name__}_play_net.pth"))
+                torch.save(agent.trick_win_predictor.state_dict(), os.path.join(logs_dir, f"{agent.__class__.__name__}_trick_predictor.pth"))
+                # only need to save one copy of the shared networks
+                break
+
 
     # NEW: Set learnable agents to evaluation mode
     for agent in agents:
