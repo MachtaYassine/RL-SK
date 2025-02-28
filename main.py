@@ -123,6 +123,7 @@ def parse_args():
     parser.add_argument("--plot_port", type=int, default=8000,
                         help="Port for live plot server")  # keep for legacy, or ignore
     parser.add_argument("--enable_tensorboard", action="store_true", help="Enable TensorBoard logging")  
+    parser.add_argument("--load_weights", action="store_true", help="Load model weights and skip training")
     return parser.parse_args()
 
 def main():
@@ -185,28 +186,28 @@ def main():
 
     env = SkullKingEnvNoSpecials(num_players=args.num_players)
 
-    # NEW: Prepare per-agent reward and loss history lists.
     agent_rewards = [[] for _ in range(args.num_players)]
     # For non-learning agents, leave loss list empty.
     agent_losses = [[] for _ in range(args.num_players)]
 
-    for episode in range(args.num_episodes):
-        logger.debug(f"=== Episode {episode+1} start ===", color="magenta")
-        
-        if "rebel" in args.agent_types:
-            rebel_agent = agents[args.agent_types.index("rebel")]
-            n_players = random.randint(2, 5)
-            n_rounds = random.randint(1, 10)
-            value_loss, policy_loss, bidding_loss = rebel_agent.train(n_players, n_rounds)
-            # Record losses from rebel training.
-            agent_losses[0].extend(policy_loss)
-            value_net_losses.extend(value_loss)
-            bidding_losses.extend(bidding_loss)
-            # NEW: Copy network weights to other rebel agents.
-            other_rebel_agents = [agent for i, agent in enumerate(agents) if args.agent_types[i]=="rebel" and agent != rebel_agent]
-            for other_agent in other_rebel_agents:
-                other_agent.bidding_network.load_state_dict(rebel_agent.bidding_network.state_dict())
-                other_agent.policy_network.load_state_dict(rebel_agent.policy_network.state_dict())
+    if args.load_weights:
+        for idx, agent in enumerate(agents):
+            if args.agent_types[idx] in ["learning", "rebel"]:
+                model_dir = os.path.join("models", args.agent_types[idx])
+                bidding_path = os.path.join(model_dir, "bidding_net.pth.tar")
+                policy_path  = os.path.join(model_dir, "policy_net.pth.tar")
+                agent.bidding_network.load_state_dict(torch.load(bidding_path))
+                agent.policy_network.load_state_dict(torch.load(policy_path))
+                logging.getLogger(__name__).info(
+                    f"Loaded weights for agent {idx} of type {args.agent_types[idx]}",
+                    color="green"
+                )
+        logging.getLogger(__name__).info(
+            "Weights loaded. Skipping training.",
+            color="green"
+        )
+        for episode in range(args.num_episodes):
+            logger.debug(f"=== Episode {episode+1} start ===", color="magenta")
             obs = env.reset()
             done = False
             episode_rewards = [0] * args.num_players
@@ -223,84 +224,116 @@ def main():
             # Record per-agent rewards.
             for i in range(args.num_players):
                 agent_rewards[i].append(episode_rewards[i])
+    else:
+
+        for episode in range(args.num_episodes):
+            logger.debug(f"=== Episode {episode+1} start ===", color="magenta")
+            
+            if "rebel" in args.agent_types:
+                rebel_agent = agents[args.agent_types.index("rebel")]
+                n_players = random.randint(2, 5)
+                n_rounds = random.randint(1, 10)
+                value_loss, policy_loss, bidding_loss = rebel_agent.train(n_players, n_rounds)
+                # Record losses from rebel training.
+                agent_losses[0].extend(policy_loss)
+                value_net_losses.extend(value_loss)
+                bidding_losses.extend(bidding_loss)
+                other_rebel_agents = [agent for i, agent in enumerate(agents) if args.agent_types[i]=="rebel" and agent != rebel_agent]
+                for other_agent in other_rebel_agents:
+                    other_agent.bidding_network.load_state_dict(rebel_agent.bidding_network.state_dict())
+                    other_agent.policy_network.load_state_dict(rebel_agent.policy_network.state_dict())
+                obs = env.reset()
+                done = False
+                episode_rewards = [0] * args.num_players
+                while not done:
+                    current_player = env.current_player
+                    agent = agents[current_player]
+                    logger.debug(f"Player {current_player}'s turn. Using step_with_agent.", color="cyan")
+                    obs, reward, done, _ = env.step_with_agent(agent)
+                    # Summing rewards if reward is a list (trick/reward per agent) or single value.
+                    if isinstance(reward, list):
+                        episode_rewards = [er + r for er, r in zip(episode_rewards, reward)]
+                    else:
+                        episode_rewards[current_player] += reward
+                # Record per-agent rewards.
+                for i in range(args.num_players):
+                    agent_rewards[i].append(episode_rewards[i])
+
+                # Save loss lists to pickle files in logs_dir.
+                with open(os.path.join(logs_dir, "value_net_losses.pkl"), "wb") as f:
+                    pickle.dump(value_net_losses, f)
+                with open(os.path.join(logs_dir, "bidding_losses.pkl"), "wb") as f:
+                    pickle.dump(bidding_losses, f)
+                
+                
+            else:
+                obs = env.reset()
+                done = False
+                episode_rewards = [0] * args.num_players
+
+                while not done:
+                    current_player = env.current_player
+                    agent = agents[current_player]
+                    logger.debug(f"Player {current_player}'s turn. Using step_with_agent.", color="cyan")
+                    obs, reward, done, _ = env.step_with_agent(agent)
+                    # Summing rewards if reward is a list (trick/reward per agent) or single value.
+                    if isinstance(reward, list):
+                        episode_rewards = [er + r for er, r in zip(episode_rewards, reward)]
+                    else:
+                        episode_rewards[current_player] += reward
+
+                logger.debug("Episode complete. Updating learning agents if applicable.", color="blue")
+                for i, agent in enumerate(agents):
+                    if hasattr(agent, "optimizer_bid") and agent.log_probs:
+                        R = 0
+                        agent_policy_losses = []
+                        for log_prob in reversed(agent.log_probs):
+                            R = 1 + 0.99 * R  # placeholder for return
+                            agent_policy_losses.insert(0, -log_prob * R)
+                        loss = torch.stack(agent_policy_losses).sum()
+                        agent.optimizer_bid.zero_grad()
+                        agent.optimizer_play.zero_grad()
+                        loss.backward()
+                        agent.optimizer_bid.step()
+                        agent.optimizer_play.step()
+                        logger.debug(f"Player {i} updated with loss: {loss.item()}")
+                        agent.log_probs.clear()
+                        # Record loss into agent_losses for learning agents.
+                        agent_losses[i].append(loss.item())
+                    else:
+                        # For non-learning agents, add a dummy value (or skip).
+                        agent_losses[i].append(None)
+                # Record per-agent rewards.
+                for i in range(args.num_players):
+                    agent_rewards[i].append(episode_rewards[i])
+                    if writer:
+                        writer.add_scalar(f"Agent_{i}/Reward", episode_rewards[i], episode)
+                        if agent_losses[i][-1] is not None:
+                            writer.add_scalar(f"Agent_{i}/Loss", agent_losses[i][-1], episode)
             
             
-        else:
-            obs = env.reset()
-            done = False
-            episode_rewards = [0] * args.num_players
+            logger.info(f"--- Episode {episode+1} complete ---", color="green")
+            # Save networks every 5 episodes
+            if (episode + 1) % 5 == 0:
+                for idx, agent_type in enumerate(args.agent_types):
+                    if agent_type == "rebel":
+                        torch.save(
+                            agents[idx].policy_network.state_dict(),
+                            os.path.join(logs_dir, f"policy_net_episode_{episode+1}.pth.tar")
+                        )
+                        torch.save(
+                            agents[idx].value_network.state_dict(),
+                            os.path.join(logs_dir, f"value_net_episode_{episode+1}.pth.tar")
+                        )
+                        torch.save(
+                            agents[idx].bidding_network.state_dict(),
+                            os.path.join(logs_dir, f"bidding_net_episode_{episode+1}.pth.tar")
+                        )
 
-            while not done:
-                current_player = env.current_player
-                agent = agents[current_player]
-                logger.debug(f"Player {current_player}'s turn. Using step_with_agent.", color="cyan")
-                obs, reward, done, _ = env.step_with_agent(agent)
-                # Summing rewards if reward is a list (trick/reward per agent) or single value.
-                if isinstance(reward, list):
-                    episode_rewards = [er + r for er, r in zip(episode_rewards, reward)]
-                else:
-                    episode_rewards[current_player] += reward
+        logger.info("Training complete.", color="green")
 
-            logger.debug("Episode complete. Updating learning agents if applicable.", color="blue")
-            # NEW: Update learning agents and record their loss; if multiple updates occur, average per episode.
-            for i, agent in enumerate(agents):
-                if hasattr(agent, "optimizer_bid") and agent.log_probs:
-                    R = 0
-                    agent_policy_losses = []
-                    for log_prob in reversed(agent.log_probs):
-                        R = 1 + 0.99 * R  # placeholder for return
-                        agent_policy_losses.insert(0, -log_prob * R)
-                    loss = torch.stack(agent_policy_losses).sum()
-                    agent.optimizer_bid.zero_grad()
-                    agent.optimizer_play.zero_grad()
-                    loss.backward()
-                    agent.optimizer_bid.step()
-                    agent.optimizer_play.step()
-                    logger.debug(f"Player {i} updated with loss: {loss.item()}")
-                    agent.log_probs.clear()
-                    # Record loss into agent_losses for learning agents.
-                    agent_losses[i].append(loss.item())
-                else:
-                    # For non-learning agents, add a dummy value (or skip).
-                    agent_losses[i].append(None)
-            # Record per-agent rewards.
-            for i in range(args.num_players):
-                agent_rewards[i].append(episode_rewards[i])
-                # NEW: Log per-agent reward and loss in TensorBoard:
-                if writer:
-                    writer.add_scalar(f"Agent_{i}/Reward", episode_rewards[i], episode)
-                    if agent_losses[i][-1] is not None:
-                        writer.add_scalar(f"Agent_{i}/Loss", agent_losses[i][-1], episode)
-        
-        
-        logger.info(f"--- Episode {episode+1} complete ---", color="green")
-        # Save networks every 5 episodes
-        if (episode + 1) % 5 == 0:
-            for idx, agent_type in enumerate(args.agent_types):
-                if agent_type == "rebel":
-                    torch.save(
-                        agents[idx].policy_network.state_dict(),
-                        os.path.join(logs_dir, f"policy_net_episode_{episode+1}.pth.tar")
-                    )
-                    torch.save(
-                        agents[idx].value_network.state_dict(),
-                        os.path.join(logs_dir, f"value_net_episode_{episode+1}.pth.tar")
-                    )
-                    torch.save(
-                        agents[idx].bidding_network.state_dict(),
-                        os.path.join(logs_dir, f"bidding_net_episode_{episode+1}.pth.tar")
-                    )
-
-    logger.info("Training complete.", color="green")
-
-    # NEW: Save loss lists to pickle files in logs_dir.
-    with open(os.path.join(logs_dir, "value_net_losses.pkl"), "wb") as f:
-        pickle.dump(value_net_losses, f)
-    with open(os.path.join(logs_dir, "bidding_losses.pkl"), "wb") as f:
-        pickle.dump(bidding_losses, f)
-
-    if writer:
-        writer.close()
+        if writer:
+            writer.close()
 
     # Update agents' internal number of players to include the human player.
     total_players = len(agents) + 1  # new total players including human
@@ -309,7 +342,7 @@ def main():
 
     plt.figure(figsize=(10, 5))
     for i in range(args.num_players):
-        plt.plot(agent_rewards[i], label=f"Agent {i} Reward")
+        plt.plot(agent_rewards[i], label=f"Agent {i} Reward (Type: {args.agent_types[i]})")
     plt.xlabel("Episode")
     plt.ylabel("Cumulative Reward")
     plt.title("Training Curve (Reward per Episode)")
@@ -329,13 +362,13 @@ def main():
     plt.show()
     plt.savefig(f"{logs_dir}/policy_loss_curve.png")
 
-# NEW: Set learnable agents to evaluation mode
+# Set learnable agents to evaluation mode
     for agent in agents:
         if hasattr(agent, 'bid_net'):
             agent.bid_net.eval()
             agent.play_net.eval()
 
-    # NEW: Launch an interactive game with a HumanAgent.
+    # Launch an interactive game with a HumanAgent.
     logger.info("Launching interactive play mode...", color="green")
     # Prepare a new game with total players = trained agents + one human.
     total_players = len(agents) + 1
