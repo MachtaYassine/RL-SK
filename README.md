@@ -56,5 +56,23 @@ This project implements a reinforcement learning environment for the card game S
 ## Running the Agent
 To run the agent within the environment, ensure that the agent's logic is implemented in `agent/agent.py`. The agent will interact with the `SkullKingEnvNoSpecials` environment, making decisions based on the current game state.
 
+## New Features in This Branch
+- Possibility to train rebel agents using an adapted ReBel algorithm.
+- Added the `--load_weights` argument to load pre-trained model weights and skip the training phase.
+- Commands below show how to train rebel agents and how to load weights.
+
+## How to Train Rebel Agents
+To train a rebel agent along with other agents, run:
+```
+python main.py --num_episodes 100 --num_players 3 --agent_types rebel simple simple --seed 42 --debug
+```
+
+## How to Load Pre-trained Weights
+To load pre-trained model weights and skip the training phase, run:
+```
+python main.py --num_episodes 100 --num_players 3 --agent_types rebel simple simple --seed 42 --load_weights --debug
+```
+The weights of the model you've trained must be in models/agent_type/ and named bidding_net.pth.tar and policy_bet.pth.tar
+
 ## Contributing
 Contributions are welcome! Please feel free to submit a pull request or open an issue for any suggestions or improvements.
