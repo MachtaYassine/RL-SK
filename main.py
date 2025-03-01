@@ -310,8 +310,6 @@ def run_interactive(args, agents, logger):
         run_interactive(args, agents, logger)
 
 
-def run_evaluation(args, agents, logger):
-    
 
 def main():
     torch.autograd.set_detect_anomaly(True)  # Enable anomaly detection
@@ -381,7 +379,7 @@ def main():
                 # only need to save one copy of the shared networks
                 break
 
-
+    # Call run evaluation here, pass the trained networks from the agent to run_evaluation here
     # NEW: Set learnable agents to evaluation mode
     for agent in agents:
         if hasattr(agent, 'bid_net'):

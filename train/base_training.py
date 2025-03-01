@@ -186,3 +186,30 @@ def run_base_training(args, env, agents, logger, writer=None):
 
     # Pack the loss curves with rewards for plotting.
     return all_rewards, (all_losses, all_bid_losses, all_play_head_losses, all_policy_losses)
+
+
+
+
+# policy_probs = torch.exp(log_porbs_for_round)
+
+#                 # Normalize policy probabilities to ensure they sum to 1
+#                 policy_probs = policy_probs / policy_probs.sum()
+
+#                 # # Modify the reward to be more risk-averse
+#                 # modified_reward = [(reward[i] + last_round * 10) / (last_round * 30) * 40 for i in range(len(reward))]
+
+#                 # Apply a risk-averse transformation to the reward
+#                 risk_averse_reward = [r - 0.5 * np.std(reward) for r in reward]  # Example: penalize variance
+
+#                 round_score_for_agent = risk_averse_reward[i]
+
+#                 # Calculate advantage with a focus on negative outcomes
+#                 baseline = np.mean(risk_averse_reward)
+#                 advantages = [(reward[i] + last_round * 10) / (last_round * 30) * 40 for i in range(len(reward))]
+
+#                 # Reduce entropy regularization to discourage exploration
+#                 entropy_coefficient = 0.001  # Lower value to reduce exploration
+#                 entropy = -torch.sum(policy_probs * log_porbs_for_round)
+
+#                 # Policy loss with reduced entropy regularization
+#                 policy_loss = -torch.mean(advantage * log_porbs_for_round) - entropy_coefficient * entropy
