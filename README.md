@@ -7,6 +7,29 @@ Note: The project has two main branches. The PAC branch explores a policy-based 
 
 Although we use the rules of the game, we do not represent blackrock games or replicate the actual game of Skull King.
 
+## Repository Cloning and Branch Management
+
+1. To clone the entire repository:
+   ```
+   git clone <repository-url>
+   ```
+   Note: By default, only the main branch is downloaded.
+
+2. To also (or to only ?) download the ReBel branch, run:
+   ```
+   git clone -b ReBel <repository-url>
+   ```
+   This ensures you obtain both branches.
+
+3. If you already have the repository cloned, you can switch branches:
+   - To switch to the ReBel branch:
+      ```
+      git checkout ReBel
+      ```
+   - To switch back to the main branch (PAC is now the main branch):
+      ```
+      git checkout main
+      ```
 
 ## Conclusion
 
@@ -91,3 +114,4 @@ Note: Ensure that the hidden dimensions (i.e., the number of layers and sizes) a
 
 ## Running the Agent
 To run the agent within the environment, ensure that the agent's logic is implemented in `agent/agent.py`. The agent will interact with the `SkullKingEnvNoSpecials` environment, making decisions based on the current game state.
+
