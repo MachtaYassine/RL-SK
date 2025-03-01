@@ -12,10 +12,10 @@ class SkullKingAgent:
         return max(0, min(hand_size, hand_size // 2))
 
     def play_card(self, observation):
-        # Simple card playing strategy: play a random card from hand
         hand = observation['hand']
-        if len(hand) > 0:
-            return random.randint(0, len(hand) - 1)  # Play a random card
+        if hand:
+            legal_actions = observation.get("legal_actions", list(range(len(hand))))
+            return random.choice(legal_actions)  # use legal moves
         return 0  # Default action if no cards are available
 
     def act(self, observation, bidding_phase):

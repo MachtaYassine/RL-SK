@@ -20,48 +20,36 @@ class IntermediateSkullKingAgent(SkullKingAgent):
 
     def play_card(self, observation):
         hand = observation['hand']
-        current_trick = observation.get('current_trick', [])
         if not hand:
             return 0
-
-        # If leading the trick, play a mid-range card. 
+        legal_actions = observation.get("legal_actions", list(range(len(hand))))
+        current_trick = observation.get('current_trick', [])
         if len(current_trick) == 0:
-            # Sort hand by rank and select the median card.
-            sorted_indices = sorted(range(len(hand)), key=lambda i: hand[i][1])
-            median_index = sorted_indices[len(sorted_indices)//2]
-            return median_index
-
-        # Else, try to beat the current winning card with the smallest winning card.
+            # Sort only legal indices by card rank and select the median move.
+            sorted_indices = sorted(legal_actions, key=lambda i: hand[i][1])
+            return sorted_indices[len(sorted_indices) // 2]
         lead_suit = current_trick[0][1][0]
         trump_suit = "Jolly Roger"
-        # Determine current winning rank & suit.
         winning_card = current_trick[0][1]
         for player, card in current_trick[1:]:
             if card[0] == trump_suit and winning_card[0] != trump_suit:
                 winning_card = card
             elif card[0] == lead_suit and winning_card[0] == lead_suit and card[1] > winning_card[1]:
                 winning_card = card
-
-        # Find candidate cards from hand that follow suit or trump if needed.
-        candidates = [(i, card) for i, card in enumerate(hand) if card[0] == lead_suit]
-        # If player has no cards that follow lead, check for trump.
+        candidates = [(i, card) for i, card in enumerate(hand) if i in legal_actions and card[0] == lead_suit]
         if not candidates:
-            candidates = [(i, card) for i, card in enumerate(hand) if card[0] == trump_suit]
-        # If any candidate can beat current winning card, select the smallest winning card.
+            candidates = [(i, card) for i, card in enumerate(hand) if i in legal_actions and card[0] == trump_suit]
         winning_candidates = []
         for i, card in candidates:
-            # If trick is trumped, only trump cards can win.
             if winning_card[0] == trump_suit and card[0] == trump_suit and card[1] > winning_card[1]:
                 winning_candidates.append((i, card))
-            # Otherwise, follow suit.
             elif winning_card[0] != trump_suit and card[0] == lead_suit and card[1] > winning_card[1]:
                 winning_candidates.append((i, card))
         if winning_candidates:
-            # Select candidate with smallest rank that still wins
             best = min(winning_candidates, key=lambda x: x[1][1])
             return best[0]
-        # Otherwise, discard lowest card.
-        discard_index = min(range(len(hand)), key=lambda i: hand[i][1])
+        # Discard lowest card among legal moves.
+        discard_index = min(legal_actions, key=lambda i: hand[i][1])
         return discard_index
 
     def act(self, observation, bidding_phase):
