@@ -33,7 +33,7 @@ Although we use the rules of the game, we do not represent blackrock games or re
 
 ## Conclusion
 
-The PAC method outputs an agent that seemingly learns to not lose any points by the end of the game, as its average final score hovers around 0.
+The PAC method outputs an agent that seemingly learns to not lose any points by the end of the game, as its average final score hovers around 0. Unfortunately, the critic part of the model failed as it does not converge as shown below.
 
 Assets images for evaluation results:
 ![Average Scores Bar](assets/All_4.png)
