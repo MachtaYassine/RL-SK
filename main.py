@@ -278,7 +278,7 @@ def run_interactive(args, agents, logger):
         else:
             print(f"Player {current_player} (AI) is acting.")
         if env.bidding_phase:
-            valid = list(range(env.action_space.n))
+            valid = list(range(env.get_legal_actions(env.current_player)))
             if isinstance(current_agent, HumanAgent):
                 action = int(input(f"Your bid (valid options: {valid}): "))
             else:

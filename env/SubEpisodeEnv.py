@@ -1,4 +1,3 @@
-from gym import spaces
 import random
 from env.SKEnvNoSpecials import SkullKingEnvNoSpecials
 
@@ -40,7 +39,6 @@ class SubEpisodeEnv(SkullKingEnvNoSpecials):
         self.current_trick = []
         self.bidding_phase = True
         self.current_player = random.randint(0, self.num_players - 1)
-        self.action_space = spaces.Discrete(self.round_number + 1)
         self.logger.info(f"SubEpisodeEnv: Next round {self.round_number} starts with player {self.current_player}.", color="cyan")
         return self._get_observation()
 

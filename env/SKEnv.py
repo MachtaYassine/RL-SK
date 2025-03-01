@@ -1,5 +1,4 @@
 import gym
-from gym import spaces
 import numpy as np
 import random
 
@@ -19,16 +18,6 @@ class SkullKingEnv(gym.Env):
         
         # Observation space
         max_hand_size = 10  # Maximum cards in a hand (round 10)
-        self.observation_space = spaces.Dict({
-            "hand": spaces.MultiDiscrete([4, 15] * max_hand_size),  # (suit, rank) pairs
-            "round_number": spaces.Discrete(11),
-            "bidding_phase": spaces.Discrete(2),
-            "tricks_won": spaces.Discrete(11),
-            "current_trick": spaces.MultiDiscrete([4, 15] * num_players)
-        })
-        
-        # Action space
-        self.action_space = spaces.Discrete(self.round_number + 1)  # Bidding action space
 
     def create_deck(self):
         suits = ["Parrot", "Treasure Chest", "Treasure Map", "Jolly Roger"]
@@ -69,7 +58,6 @@ class SkullKingEnv(gym.Env):
             self.current_player = (self.current_player + 1) % self.num_players
             if all(b is not None for b in self.bids):
                 self.bidding_phase = False
-                self.action_space = spaces.Discrete(len(self.hands[self.current_player]))
             return self._get_observation(), 0, False, {}
         else:
             played_card = self.hands[self.current_player].pop(action)

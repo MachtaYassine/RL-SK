@@ -1,5 +1,4 @@
 import gym
-from gym import spaces
 import numpy as np
 import random
 from typing import List
@@ -42,7 +41,6 @@ class SkullKingEnvNoSpecials(gym.Env):
         
         
         # Action space
-        self.action_space = spaces.Discrete(self.round_number + 1)  # Bidding action space
 
     def create_deck(self):
         suits = ["Parrot", "Treasure Chest", "Treasure Map", "Jolly Roger"]
@@ -164,7 +162,6 @@ class SkullKingEnvNoSpecials(gym.Env):
         if all(b is not None for b in self.bids):
             self.bidding_phase = False
             # Now selecting a card, so change the action space accordingly.
-            self.action_space = spaces.Discrete(len(self.hands[0]))
             self.logger.debug("All bids received. Transitioning to play phase.", color="green")
         obs = self._get_observation()
         self.logger.debug(f"Observation after bidding: {obs}", color="magenta")
@@ -296,7 +293,6 @@ class SkullKingEnvNoSpecials(gym.Env):
         self.bidding_phase = True
         # NEW: Randomize the starting player for this round.
         self.current_player = random.randint(0, self.num_players - 1)
-        self.action_space = spaces.Discrete(self.round_number + 1)
         self.logger.info(f"Next round {self.round_number} starts with player {self.current_player} as leader.", color="cyan")
         return self._get_observation()
 
