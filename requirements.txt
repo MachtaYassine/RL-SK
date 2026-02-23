@@ -1,5 +1,2 @@
-gym
-numpy
-matplotlib
 torch
 tensorboard

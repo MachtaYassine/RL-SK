@@ -7,3 +7,5 @@ tensorboard_logs/
 *.pyc
 
 rl_old
+.claude/
+runs/
