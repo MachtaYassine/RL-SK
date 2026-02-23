@@ -9,3 +9,4 @@ tensorboard_logs/
 rl_old
 .claude/
 runs/
+checkpoints/
