@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 
 import torch
@@ -31,6 +32,8 @@ def main():
     train_p.add_argument("--device", type=str, default="cpu")
     train_p.add_argument("--log-dir", type=str, default="runs")
     train_p.add_argument("--save-dir", type=str, default="checkpoints")
+    train_p.add_argument("--resume", type=str, default=None,
+                         help="Path to checkpoint to resume from (default: auto-detect latest.pt)")
 
     # Play
     play_p = sub.add_parser("play", help="Play interactively against the agent")
@@ -66,6 +69,13 @@ def main():
             save_dir=args.save_dir,
         )
         trainer = Trainer(ppo_cfg, game_cfg, train_cfg, device=args.device)
+        resume_path = args.resume
+        if resume_path is None:
+            default = os.path.join(args.save_dir, "latest.pt")
+            if os.path.exists(default):
+                resume_path = default
+        if resume_path:
+            trainer.load_checkpoint(resume_path)
         trainer.train()
 
     elif args.command == "play":

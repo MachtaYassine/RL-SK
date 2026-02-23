@@ -117,6 +117,19 @@ class Trainer:
         # Persistent worker pool
         self._pool: Optional[mp.Pool] = None
 
+    def load_checkpoint(self, path: str) -> None:
+        """Resume training from a checkpoint."""
+        ckpt = torch.load(path, map_location=self.device, weights_only=True)
+        self.bid_net.load_state_dict(ckpt["bid_net"])
+        self.play_net.load_state_dict(ckpt["play_net"])
+        if "bid_optimizer" in ckpt:
+            self.ppo.bid_optimizer.load_state_dict(ckpt["bid_optimizer"])
+        if "play_optimizer" in ckpt:
+            self.ppo.play_optimizer.load_state_dict(ckpt["play_optimizer"])
+        self.player_elo = ckpt.get("player_elo", 1200.0)
+        self.total_games = ckpt.get("total_games", 0)
+        logger.info(f"Resumed from {path} at game {self.total_games} (ELO {self.player_elo:.0f})")
+
     def _get_pool(self) -> mp.Pool:
         if self._pool is None:
             mp.set_start_method("fork", force=True)
@@ -147,7 +160,7 @@ class Trainer:
         logger.info(f"Starting training for {self.train_config.total_games} games")
         start_time = time.time()
 
-        games_remaining = self.train_config.total_games
+        games_remaining = self.train_config.total_games - self.total_games
         while games_remaining > 0:
             games_this_round = min(self.effective_update_interval, games_remaining)
             self._collect_games(games_this_round)
