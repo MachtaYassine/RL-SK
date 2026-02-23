@@ -1,10 +1,26 @@
-"""Bid actor-critic network for PPO."""
+"""Bid actor-critic network for PPO with residual backbone."""
 
 from __future__ import annotations
 
 import torch
 import torch.nn as nn
 from networks.features import BID_DIM
+
+
+class ResBlock(nn.Module):
+    """Pre-norm residual block: LayerNorm -> Linear -> ReLU -> Linear -> skip -> ReLU."""
+
+    def __init__(self, dim: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, dim),
+            nn.ReLU(),
+            nn.Linear(dim, dim),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.relu(x + self.net(x))
 
 
 class BidActorCritic(nn.Module):
@@ -15,14 +31,14 @@ class BidActorCritic(nn.Module):
     Critic output: scalar value
     """
 
-    def __init__(self, hidden_dim: int = 256):
+    def __init__(self, hidden_dim: int = 512):
         super().__init__()
-        self.shared = nn.Sequential(
+        self.input_proj = nn.Sequential(
             nn.Linear(BID_DIM, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.ReLU(),
         )
+        self.res_blocks = nn.Sequential(*[ResBlock(hidden_dim) for _ in range(4)])
         self.actor_head = nn.Linear(hidden_dim, 11)
         self.critic_head = nn.Linear(hidden_dim, 1)
 
@@ -38,7 +54,8 @@ class BidActorCritic(nn.Module):
             (log_probs, value) where log_probs is [batch, 11] masked log probs
             and value is [batch, 1]
         """
-        h = self.shared(x)
+        h = self.input_proj(x)
+        h = self.res_blocks(h)
         logits = self.actor_head(h)
         # Mask illegal actions
         logits = logits + (legal_mask.log().clamp(min=-1e8))

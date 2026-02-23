@@ -300,6 +300,7 @@ class Trainer:
             self.play_buffer.add(
                 t["state"], t["action"], t["log_prob"],
                 t["value"], t["reward"], t["done"], t["legal_mask"],
+                t.get("trick_history"),
             )
 
         for s in result["scores"]:

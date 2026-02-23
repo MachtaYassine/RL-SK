@@ -87,7 +87,12 @@ class PPO:
                 ret = batch["returns"].to(device)
                 masks = batch["legal_masks"].to(device)
 
-                log_probs, values = net(states, masks)
+                trick_histories = batch.get("trick_histories")
+                if trick_histories is not None:
+                    trick_histories = trick_histories.to(device)
+                    log_probs, values = net(states, masks, trick_histories)
+                else:
+                    log_probs, values = net(states, masks)
                 values = values.squeeze(-1)
 
                 # Gather log probs for taken actions

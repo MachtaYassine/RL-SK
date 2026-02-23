@@ -21,6 +21,8 @@ BID_DIM = 159
 PLAY_DIM = 195
 MAX_HAND_SIZE = 10
 MAX_PLAYERS = 8
+MAX_TRICKS = 10
+TRICK_FEAT_DIM = 17  # card_ids(8) + player_ids(8) + winner_id(1)
 
 
 def encode_bid_state(state: GameState) -> torch.Tensor:
@@ -131,6 +133,32 @@ def encode_play_state(state: GameState) -> torch.Tensor:
 
     assert idx == PLAY_DIM, f"Expected {PLAY_DIM}, got {idx}"
     return features
+
+
+def encode_trick_history(trick_history: list, num_players: int) -> torch.Tensor:
+    """Encode completed tricks into a fixed-size tensor.
+
+    Args:
+        trick_history: List of dicts with keys 'card_ids' (list[int]),
+                       'player_ids' (list[int]), 'winner_id' (int).
+        num_players: Number of players in the game.
+
+    Returns:
+        Tensor of shape [MAX_TRICKS, TRICK_FEAT_DIM], zero-padded.
+    """
+    result = torch.zeros(MAX_TRICKS, TRICK_FEAT_DIM)
+    for t, trick in enumerate(trick_history[:MAX_TRICKS]):
+        idx = 0
+        for i in range(MAX_PLAYERS):
+            if i < len(trick["card_ids"]):
+                result[t, idx + i] = trick["card_ids"][i] / NUM_CARDS
+        idx += MAX_PLAYERS
+        for i in range(MAX_PLAYERS):
+            if i < len(trick["player_ids"]):
+                result[t, idx + i] = trick["player_ids"][i] / max(num_players - 1, 1)
+        idx += MAX_PLAYERS
+        result[t, idx] = trick["winner_id"] / max(num_players - 1, 1)
+    return result
 
 
 def get_legal_bid_mask(state: GameState) -> torch.Tensor:

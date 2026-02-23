@@ -25,6 +25,7 @@ from networks.play_network import PlayActorCritic
 from networks.features import (
     encode_bid_state, encode_play_state,
     get_legal_bid_mask, get_legal_play_mask,
+    encode_trick_history,
 )
 from skull_king.cards import SpecialType
 from skull_king.game import SkullKingGame, Phase
@@ -76,6 +77,11 @@ def play_games(
         prev_tricks_won = 0  # player 0's tricks before this play action
         player_bid = 0       # player 0's bid for current round
 
+        # Trick history tracking for LSTM
+        trick_history_list: List[dict] = []  # completed tricks this round
+        current_trick_card_ids: List[int] = []
+        current_trick_player_ids: List[int] = []
+
         while not game.is_game_over():
             pid = game.get_current_player()
             cur_round = game.round_number
@@ -92,6 +98,9 @@ def play_games(
                 round_play_trans = []
                 prev_round = cur_round
                 prev_tricks_won = 0
+                trick_history_list = []
+                current_trick_card_ids = []
+                current_trick_player_ids = []
 
             state = game.get_state(pid)
 
@@ -121,11 +130,18 @@ def play_games(
                 if pid == 0:
                     features = encode_play_state(state)
                     mask = get_legal_play_mask(state)
+                    trick_hist_tensor = encode_trick_history(trick_history_list, np_)
                     with torch.no_grad():
-                        action, log_prob, value, entropy = play_net.get_action_and_value(features, mask)
+                        action, log_prob, value, entropy = play_net.get_action_and_value(
+                            features, mask, trick_hist_tensor)
                     tigress = None
                     if action < len(state.hand) and state.hand[action].special == SpecialType.TIGRESS:
                         tigress = state.all_bids[pid] > state.all_tricks_won[pid]
+
+                    # Track the card being played for trick history
+                    played_card = state.hand[action] if action < len(state.hand) else state.hand[0]
+                    current_trick_card_ids.append(played_card.card_id)
+                    current_trick_player_ids.append(pid)
 
                     prev_tricks_won = game.players[0].tricks_won
                     result = game.step_play(pid, action, tigress)
@@ -136,20 +152,29 @@ def play_games(
                         new_tricks = game.players[0].tricks_won
                         won_trick = new_tricks > prev_tricks_won
                         if won_trick:
-                            # Won a trick: good if under/at bid, bad if over bid
                             if new_tricks <= player_bid:
                                 trick_reward = 0.1
                             else:
                                 trick_reward = -0.1
                         else:
-                            # Didn't win: good if already at bid, bad if under bid
                             if prev_tricks_won < player_bid:
                                 trick_reward = -0.05
-                            # else: neutral
+
+                        # Record completed trick
+                        winner_idx = result.winner_index
+                        trick_history_list.append({
+                            "card_ids": list(current_trick_card_ids),
+                            "player_ids": list(current_trick_player_ids),
+                            "winner_id": current_trick_player_ids[winner_idx]
+                                if winner_idx < len(current_trick_player_ids) else 0,
+                        })
+                        current_trick_card_ids = []
+                        current_trick_player_ids = []
 
                     round_play_trans.append({
                         "state": features, "action": action, "log_prob": log_prob,
-                        "value": value, "reward": trick_reward, "done": False, "legal_mask": mask,
+                        "value": value, "reward": trick_reward, "done": False,
+                        "legal_mask": mask, "trick_history": trick_hist_tensor,
                     })
                 else:
                     if use_heuristic_opp:
@@ -162,7 +187,25 @@ def play_games(
                         tig = None
                         if hi < len(state.hand) and state.hand[hi].special == SpecialType.TIGRESS:
                             tig = True
-                    game.step_play(pid, hi, tig)
+
+                    # Track opponent's card for trick history
+                    if hi < len(state.hand):
+                        current_trick_card_ids.append(state.hand[hi].card_id)
+                    current_trick_player_ids.append(pid)
+
+                    result = game.step_play(pid, hi, tig)
+
+                    # Record completed trick from opponent's play
+                    if result is not None:
+                        winner_idx = result.winner_index
+                        trick_history_list.append({
+                            "card_ids": list(current_trick_card_ids),
+                            "player_ids": list(current_trick_player_ids),
+                            "winner_id": current_trick_player_ids[winner_idx]
+                                if winner_idx < len(current_trick_player_ids) else 0,
+                        })
+                        current_trick_card_ids = []
+                        current_trick_player_ids = []
 
         # Flush last round's transitions
         if prev_round in game.round_scores:

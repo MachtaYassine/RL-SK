@@ -16,7 +16,7 @@ class PPOConfig:
     batch_size: int = 0  # 0 = auto-scale based on GPU memory
     gamma: float = 0.99
     gae_lambda: float = 0.95
-    hidden_dim: int = 256
+    hidden_dim: int = 512
 
 
 @dataclass

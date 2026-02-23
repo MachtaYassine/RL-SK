@@ -7,7 +7,7 @@ different state dimensions and action spaces.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 import torch
 
@@ -21,6 +21,7 @@ class Transition:
     reward: float
     done: bool
     legal_mask: torch.Tensor
+    trick_history: Optional[torch.Tensor] = None
 
 
 class RolloutBuffer:
@@ -30,10 +31,12 @@ class RolloutBuffer:
         self.transitions: List[Transition] = []
 
     def add(self, state: torch.Tensor, action: int, log_prob: float,
-            value: float, reward: float, done: bool, legal_mask: torch.Tensor) -> None:
+            value: float, reward: float, done: bool, legal_mask: torch.Tensor,
+            trick_history: Optional[torch.Tensor] = None) -> None:
         self.transitions.append(Transition(
             state=state, action=action, log_prob=log_prob,
             value=value, reward=reward, done=done, legal_mask=legal_mask,
+            trick_history=trick_history,
         ))
 
     def compute_gae(self, gamma: float = 0.99, lam: float = 0.95,
@@ -73,6 +76,7 @@ class RolloutBuffer:
         n = len(self.transitions)
         indices = torch.randperm(n)
         batches = []
+        has_trick_history = self.transitions[0].trick_history is not None
 
         for start in range(0, n, batch_size):
             end = min(start + batch_size, n)
@@ -86,6 +90,10 @@ class RolloutBuffer:
                 "returns": returns[idx],
                 "legal_masks": torch.stack([self.transitions[i].legal_mask for i in idx]),
             }
+            if has_trick_history:
+                batch["trick_histories"] = torch.stack(
+                    [self.transitions[i].trick_history for i in idx]
+                )
             batches.append(batch)
 
         return batches
