@@ -40,6 +40,12 @@ def main():
     play_p.add_argument("--checkpoint", type=str, default="checkpoints/latest.pt")
     play_p.add_argument("--players", type=int, default=4)
 
+    # GUI
+    gui_p = sub.add_parser("gui", help="Play with pygame GUI")
+    gui_p.add_argument("--checkpoint", type=str, default=None,
+                       help="Neural agent checkpoint (default: use heuristic)")
+    gui_p.add_argument("--opponents", type=int, default=3)
+
     # Evaluate
     eval_p = sub.add_parser("evaluate", help="Evaluate agent vs heuristic")
     eval_p.add_argument("--checkpoint", type=str, default="checkpoints/latest.pt")
@@ -109,6 +115,22 @@ def main():
             label = "You" if i == 0 else f"Player {i}"
             print(f"  {label}: {s}")
         print(f"Winner: {'You' if game.get_winner() == 0 else f'Player {game.get_winner()}'}")
+
+    elif args.command == "gui":
+        from agents.heuristic_agent import HeuristicAgent
+        from gui.game_manager import GameManager
+        from gui.app import run as gui_run
+
+        agents = []
+        for i in range(args.opponents):
+            if args.checkpoint and os.path.exists(args.checkpoint):
+                from agents.neural_agent import NeuralAgent
+                agents.append(NeuralAgent(args.checkpoint))
+            else:
+                agents.append(HeuristicAgent(seed=i))
+
+        manager = GameManager(agents)
+        gui_run(manager)
 
     elif args.command == "evaluate":
         from agents.heuristic_agent import HeuristicAgent

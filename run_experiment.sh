@@ -20,7 +20,7 @@
 # --- Configuration ---
 TOTAL_GAMES=100000
 NUM_PLAYERS=4
-WORKERS=4
+WORKERS=1
 DEVICE="cpu"
 SAVE_DIR="checkpoints"
 LOG_DIR="runs"
@@ -35,10 +35,6 @@ requeue_job() {
 }
 trap requeue_job USR1
 
-# --- Activate environment (adjust to your setup) ---
-# source ~/miniconda3/bin/activate skullking
-# module load python/3.10
-# source ~/venv/bin/activate
 
 echo "$(date): Starting training (Job ID: $SLURM_JOB_ID)"
 echo "Games: $TOTAL_GAMES | Players: $NUM_PLAYERS | Workers: $WORKERS"
@@ -49,9 +45,9 @@ if [ -f "${SAVE_DIR}/latest.pt" ]; then
 fi
 
 # --- Run training (auto-detects latest.pt for resume) ---
-python cli.py train \
+conda run --no-capture-output -n rlsk python cli.py train \
     --games $TOTAL_GAMES \
-    --players $NUM_PLAYERS \
+    --vary-players \
     --workers $WORKERS \
     --device $DEVICE \
     --save-dir $SAVE_DIR \

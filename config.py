@@ -10,7 +10,7 @@ class PPOConfig:
     lr: float = 3e-4
     clip_eps: float = 0.2
     value_coef: float = 0.5
-    entropy_coef: float = 0.05
+    entropy_coef: float = 0.15
     max_grad_norm: float = 0.5
     epochs: int = 4
     batch_size: int = 0  # 0 = auto-scale based on GPU memory
@@ -39,3 +39,5 @@ class TrainConfig:
     snapshot_interval: int = 50
     log_dir: str = "runs"
     save_dir: str = "checkpoints"
+    exploration_burst_interval: int = 5000
+    exploration_burst_duration: int = 500

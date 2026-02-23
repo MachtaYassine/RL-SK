@@ -114,6 +114,10 @@ class Trainer:
         self.last_bid_stats = None
         self.last_play_stats = None
 
+        # Exploration bursts
+        self._burst_active = False
+        self._burst_start_game = 0
+
         # Persistent worker pool
         self._pool: Optional[mp.Pool] = None
 
@@ -167,6 +171,14 @@ class Trainer:
             self.total_games += games_this_round
             games_remaining -= games_this_round
 
+            # Exploration burst logic
+            burst_interval = self.train_config.exploration_burst_interval
+            burst_duration = self.train_config.exploration_burst_duration
+            if not self._burst_active and self.total_games % burst_interval < self.effective_update_interval:
+                self._start_burst()
+            elif self._burst_active and self.total_games - self._burst_start_game >= burst_duration:
+                self._end_burst()
+
             # PPO update
             self._update_networks()
 
@@ -207,11 +219,33 @@ class Trainer:
         self._save_checkpoint()
         logger.info("Training complete")
 
+    def _start_burst(self) -> None:
+        """Start an exploration burst: inject noise and boost entropy."""
+        self._burst_active = True
+        self._burst_start_game = self.total_games
+        # Inject Gaussian noise into actor head weights
+        with torch.no_grad():
+            for name, param in self.bid_net.named_parameters():
+                if "actor" in name:
+                    param.data += torch.randn_like(param) * 0.1
+            for name, param in self.play_net.named_parameters():
+                if "actor" in name:
+                    param.data += torch.randn_like(param) * 0.1
+        # Boost entropy coefficient
+        self.ppo.entropy_coef = 0.5
+        logger.info(f"Exploration burst started at game {self.total_games}")
+
+    def _end_burst(self) -> None:
+        """End an exploration burst: restore entropy coefficient."""
+        self._burst_active = False
+        self.ppo.entropy_coef = self.ppo_config.entropy_coef
+        logger.info(f"Exploration burst ended at game {self.total_games}")
+
     def _collect_games(self, num_games: int) -> None:
         """Collect transitions from num_games, using parallel workers if available."""
         bid_sd = {k: v.cpu() for k, v in self.bid_net.state_dict().items()}
         play_sd = {k: v.cpu() for k, v in self.play_net.state_dict().items()}
-        use_heuristic = random.random() < 0.2
+        use_heuristic = random.random() < 0.4
 
         common_args = dict(
             bid_state_dict=bid_sd,
