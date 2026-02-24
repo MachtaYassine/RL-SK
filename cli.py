@@ -133,20 +133,12 @@ def main():
         gui_run(manager)
 
     elif args.command == "evaluate":
+        from agents.neural_agent import NeuralAgent
         from agents.heuristic_agent import HeuristicAgent
-        from networks.bid_network import BidActorCritic
-        from networks.play_network import PlayActorCritic
-        from networks.features import encode_bid_state, encode_play_state, get_legal_bid_mask, get_legal_play_mask
-        from skull_king.cards import SpecialType
         from skull_king.game import SkullKingGame, Phase
 
+        neural = NeuralAgent(args.checkpoint)
         ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
-        bid_net = BidActorCritic()
-        play_net = PlayActorCritic()
-        bid_net.load_state_dict(ckpt["bid_net"])
-        play_net.load_state_dict(ckpt["play_net"])
-        bid_net.eval()
-        play_net.eval()
 
         wins = 0
         total_score = 0
@@ -161,24 +153,27 @@ def main():
 
                 if game.phase == Phase.BIDDING:
                     if pid == 0:
-                        f = encode_bid_state(state)
-                        m = get_legal_bid_mask(state)
-                        a, _, _, _ = bid_net.get_action_and_value(f, m)
-                        game.step_bid(pid, a)
+                        bid = neural.choose_bid(state)
+                        game.step_bid(pid, bid)
                     else:
                         game.step_bid(pid, heuristic.choose_bid(state))
                 elif game.phase == Phase.PLAYING:
                     if pid == 0:
-                        f = encode_play_state(state)
-                        m = get_legal_play_mask(state)
-                        a, _, _, _ = play_net.get_action_and_value(f, m)
-                        tig = None
-                        if a < len(state.hand) and state.hand[a].special == SpecialType.TIGRESS:
-                            tig = True
-                        game.step_play(pid, a, tig)
+                        hi, tig = neural.choose_play(state)
+                        played_card = state.hand[hi] if hi < len(state.hand) else state.hand[0]
+                        neural.observe_card_played(pid, played_card.card_id)
+                        result = game.step_play(pid, hi, tig)
+                        if result is not None:
+                            neural.observe_trick_complete(
+                                result.winner_index if hasattr(result, 'winner_index') else 0)
                     else:
                         hi, tig = heuristic.choose_play(state)
-                        game.step_play(pid, hi, tig)
+                        if hi < len(state.hand):
+                            neural.observe_card_played(pid, state.hand[hi].card_id)
+                        result = game.step_play(pid, hi, tig)
+                        if result is not None:
+                            neural.observe_trick_complete(
+                                result.winner_index if hasattr(result, 'winner_index') else 0)
 
             if game.get_winner() == 0:
                 wins += 1

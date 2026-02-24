@@ -6,22 +6,22 @@ different state dimensions and action spaces.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import List, Optional
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Union
 
 import torch
 
 
 @dataclass
 class Transition:
-    state: torch.Tensor
+    state: Dict[str, torch.Tensor]  # v2 encoded state dict
     action: int
     log_prob: float
     value: float
     reward: float
     done: bool
     legal_mask: torch.Tensor
-    trick_history: Optional[torch.Tensor] = None
+    trick_history: Optional[Dict[str, torch.Tensor]] = None
 
 
 class RolloutBuffer:
@@ -30,9 +30,9 @@ class RolloutBuffer:
     def __init__(self):
         self.transitions: List[Transition] = []
 
-    def add(self, state: torch.Tensor, action: int, log_prob: float,
+    def add(self, state: Dict[str, torch.Tensor], action: int, log_prob: float,
             value: float, reward: float, done: bool, legal_mask: torch.Tensor,
-            trick_history: Optional[torch.Tensor] = None) -> None:
+            trick_history: Optional[Dict[str, torch.Tensor]] = None) -> None:
         self.transitions.append(Transition(
             state=state, action=action, log_prob=log_prob,
             value=value, reward=reward, done=done, legal_mask=legal_mask,
@@ -78,22 +78,35 @@ class RolloutBuffer:
         batches = []
         has_trick_history = self.transitions[0].trick_history is not None
 
+        # Determine state dict keys from first transition
+        state_keys = list(self.transitions[0].state.keys())
+
         for start in range(0, n, batch_size):
             end = min(start + batch_size, n)
             idx = indices[start:end]
 
+            # Stack each state dict key separately
+            states = {}
+            for k in state_keys:
+                states[k] = torch.stack([self.transitions[i].state[k] for i in idx])
+
             batch = {
-                "states": torch.stack([self.transitions[i].state for i in idx]),
+                "states": states,
                 "actions": torch.tensor([self.transitions[i].action for i in idx], dtype=torch.long),
                 "old_log_probs": torch.tensor([self.transitions[i].log_prob for i in idx]),
                 "advantages": advantages[idx],
                 "returns": returns[idx],
                 "legal_masks": torch.stack([self.transitions[i].legal_mask for i in idx]),
             }
+
             if has_trick_history:
-                batch["trick_histories"] = torch.stack(
-                    [self.transitions[i].trick_history for i in idx]
-                )
+                th_keys = list(self.transitions[0].trick_history.keys())
+                trick_histories = {}
+                for k in th_keys:
+                    trick_histories[k] = torch.stack(
+                        [self.transitions[i].trick_history[k] for i in idx])
+                batch["trick_histories"] = trick_histories
+
             batches.append(batch)
 
         return batches

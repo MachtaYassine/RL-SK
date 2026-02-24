@@ -10,13 +10,15 @@ class PPOConfig:
     lr: float = 3e-4
     clip_eps: float = 0.2
     value_coef: float = 0.5
-    entropy_coef: float = 0.15
+    entropy_coef: float = 0.02
     max_grad_norm: float = 0.5
     epochs: int = 4
     batch_size: int = 0  # 0 = auto-scale based on GPU memory
     gamma: float = 0.99
     gae_lambda: float = 0.95
-    hidden_dim: int = 512
+    hidden_dim: int = 256
+    card_embed_dim: int = 16
+    player_embed_dim: int = 4
 
 
 @dataclass
@@ -39,5 +41,5 @@ class TrainConfig:
     snapshot_interval: int = 50
     log_dir: str = "runs"
     save_dir: str = "checkpoints"
-    exploration_burst_interval: int = 5000
-    exploration_burst_duration: int = 500
+    exploration_burst_interval: int = 0  # 0 = disabled
+    exploration_burst_duration: int = 0

@@ -15,16 +15,18 @@ import torch.multiprocessing as mp
 from agents.heuristic_agent import HeuristicAgent
 from config import PPOConfig, GameConfig, TrainConfig
 from monitoring.metrics import MetricsLogger
+from networks.card_embedding import CardEmbedding, PlayerEmbedding
 from networks.bid_network import BidActorCritic
 from networks.play_network import PlayActorCritic
 from networks.features import (
-    encode_bid_state, encode_play_state,
+    encode_bid_state_v2, encode_play_state_v2,
     get_legal_bid_mask, get_legal_play_mask,
-    PLAY_DIM,
+    encode_trick_history_v2,
+    PLAY_SCALAR_DIM,
 )
 from skull_king.cards import SpecialType
 from skull_king.game import SkullKingGame, Phase
-from training.ppo import PPO
+from training.ppo import PPO, PPOStats
 from training.rollout_buffer import RolloutBuffer
 from training.self_play import OpponentPool
 from training.worker import play_games
@@ -52,7 +54,7 @@ class Trainer:
         self.train_config = train_config
         self.ppo_config = ppo_config
 
-        # Workers (resolve first since update_interval depends on it)
+        # Workers
         self.num_workers = train_config.num_workers
         if self.num_workers <= 0:
             self.num_workers = max(1, os.cpu_count() or 1)
@@ -63,7 +65,6 @@ class Trainer:
             batch_size = self._auto_batch_size(ppo_config.hidden_dim)
         update_interval = train_config.update_interval
         if update_interval <= 0:
-            # Each worker should get at least 30 games to amortize overhead
             min_per_worker = 30
             min_for_ppo = max(10, batch_size * 4 // 55)
             update_interval = max(min_for_ppo, min_per_worker * self.num_workers)
@@ -75,9 +76,26 @@ class Trainer:
             f"Workers: {self.num_workers}"
         )
 
-        # Networks
-        self.bid_net = BidActorCritic(ppo_config.hidden_dim).to(self.device)
-        self.play_net = PlayActorCritic(ppo_config.hidden_dim).to(self.device)
+        # Shared embeddings
+        self.card_emb = CardEmbedding(ppo_config.card_embed_dim).to(self.device)
+        self.player_emb = PlayerEmbedding(embed_dim=ppo_config.player_embed_dim).to(self.device)
+
+        # Networks (share embedding modules)
+        self.bid_net = BidActorCritic(
+            self.card_emb, self.player_emb, ppo_config.hidden_dim
+        ).to(self.device)
+        self.play_net = PlayActorCritic(
+            self.card_emb, self.player_emb, ppo_config.hidden_dim
+        ).to(self.device)
+
+        # Log param counts
+        bid_params = sum(p.numel() for p in self.bid_net.parameters())
+        play_params = sum(p.numel() for p in self.play_net.parameters())
+        # Shared params counted in both, so unique total is less
+        shared_params = sum(p.numel() for p in self.card_emb.parameters()) + \
+                        sum(p.numel() for p in self.player_emb.parameters())
+        logger.info(f"Bid net params: {bid_params:,} | Play net params: {play_params:,} | "
+                    f"Shared embed params: {shared_params:,}")
 
         # PPO
         self.ppo = PPO(
@@ -144,14 +162,12 @@ class Trainer:
         """Pick batch size based on available GPU memory."""
         if not torch.cuda.is_available() or self.device.type != "cuda":
             return 256
-
         try:
             torch.cuda.set_device(self.device)
             free_mem = torch.cuda.mem_get_info(self.device)[0]
         except Exception:
             return 256
-
-        bytes_per_sample = (PLAY_DIM + 2 * hidden_dim + 11) * 4 * 3
+        bytes_per_sample = (PLAY_SCALAR_DIM + 2 * hidden_dim + 11) * 4 * 3
         target_mem = free_mem * 0.5
         batch = int(target_mem / bytes_per_sample)
         batch = max(64, min(batch, 65536))
@@ -171,13 +187,14 @@ class Trainer:
             self.total_games += games_this_round
             games_remaining -= games_this_round
 
-            # Exploration burst logic
+            # Exploration burst logic (disabled by default, set interval > 0 to enable)
             burst_interval = self.train_config.exploration_burst_interval
             burst_duration = self.train_config.exploration_burst_duration
-            if not self._burst_active and self.total_games % burst_interval < self.effective_update_interval:
-                self._start_burst()
-            elif self._burst_active and self.total_games - self._burst_start_game >= burst_duration:
-                self._end_burst()
+            if burst_interval > 0:
+                if not self._burst_active and self.total_games % burst_interval < self.effective_update_interval:
+                    self._start_burst()
+                elif self._burst_active and self.total_games - self._burst_start_game >= burst_duration:
+                    self._end_burst()
 
             # PPO update
             self._update_networks()
@@ -223,7 +240,6 @@ class Trainer:
         """Start an exploration burst: inject noise and boost entropy."""
         self._burst_active = True
         self._burst_start_game = self.total_games
-        # Inject Gaussian noise into actor head weights
         with torch.no_grad():
             for name, param in self.bid_net.named_parameters():
                 if "actor" in name:
@@ -231,7 +247,6 @@ class Trainer:
             for name, param in self.play_net.named_parameters():
                 if "actor" in name:
                     param.data += torch.randn_like(param) * 0.1
-        # Boost entropy coefficient
         self.ppo.entropy_coef = 0.5
         logger.info(f"Exploration burst started at game {self.total_games}")
 
@@ -245,7 +260,19 @@ class Trainer:
         """Collect transitions from num_games, using parallel workers if available."""
         bid_sd = {k: v.cpu() for k, v in self.bid_net.state_dict().items()}
         play_sd = {k: v.cpu() for k, v in self.play_net.state_dict().items()}
-        use_heuristic = random.random() < 0.4
+
+        # Use opponent pool to select opponent type per worker
+        opp_type = self.opponent_pool.sample_opponent_type()
+        use_heuristic = (opp_type == "heuristic")
+        opp_bid_sd = None
+        opp_play_sd = None
+        if opp_type == "pool":
+            entry = self.opponent_pool.get_pool_snapshot()
+            if entry is not None:
+                opp_bid_sd = {k: v.cpu() if hasattr(v, 'cpu') else v
+                              for k, v in entry.bid_state.items()}
+                opp_play_sd = {k: v.cpu() if hasattr(v, 'cpu') else v
+                               for k, v in entry.play_state.items()}
 
         common_args = dict(
             bid_state_dict=bid_sd,
@@ -256,6 +283,10 @@ class Trainer:
             min_players=self.game_config.min_players,
             max_players=self.game_config.max_players,
             use_heuristic_opp=use_heuristic,
+            opp_bid_state_dict=opp_bid_sd,
+            opp_play_state_dict=opp_play_sd,
+            card_embed_dim=self.ppo_config.card_embed_dim,
+            player_embed_dim=self.ppo_config.player_embed_dim,
         )
 
         if self.num_workers > 1:
@@ -276,7 +307,8 @@ class Trainer:
                 (a["num_games"], a["bid_state_dict"], a["play_state_dict"],
                  a["hidden_dim"], a["num_players"], a["vary_players"],
                  a["min_players"], a["max_players"], a["use_heuristic_opp"],
-                 a["seed"])
+                 a["seed"], a["opp_bid_state_dict"], a["opp_play_state_dict"],
+                 a["card_embed_dim"], a["player_embed_dim"])
                 for a in args_list
             ])
             for result in results:
@@ -319,22 +351,69 @@ class Trainer:
             self.metrics.log_scalar("Eval/ELO", self.player_elo, self.total_games)
 
     def _update_networks(self) -> None:
-        """Run PPO updates on both networks."""
+        """Run PPO updates on both networks and log all diagnostics."""
         if len(self.bid_buffer) > 0:
+            # Log bid distribution before clearing
+            bid_actions = torch.tensor([t.action for t in self.bid_buffer.transitions])
+            self.metrics.log_histogram("Diagnostics/BidDistribution", bid_actions, self.total_games)
+
             self.last_bid_stats = self.ppo.update(self.bid_buffer, "bid")
-            self.metrics.log_scalar("Loss/Policy/Bid", self.last_bid_stats.policy_loss, self.total_games)
-            self.metrics.log_scalar("Loss/Value/Bid", self.last_bid_stats.value_loss, self.total_games)
-            self.metrics.log_scalar("Policy/Entropy/Bid", self.last_bid_stats.entropy, self.total_games)
-            self.metrics.log_scalar("Policy/ClipFraction/Bid", self.last_bid_stats.clip_fraction, self.total_games)
+            self._log_stats(self.last_bid_stats, "Bid")
             self.bid_buffer.clear()
 
         if len(self.play_buffer) > 0:
+            # Log play action distribution before clearing
+            play_actions = torch.tensor([t.action for t in self.play_buffer.transitions])
+            self.metrics.log_histogram("Diagnostics/PlayActionDistribution", play_actions, self.total_games)
+
             self.last_play_stats = self.ppo.update(self.play_buffer, "play")
-            self.metrics.log_scalar("Loss/Policy/Play", self.last_play_stats.policy_loss, self.total_games)
-            self.metrics.log_scalar("Loss/Value/Play", self.last_play_stats.value_loss, self.total_games)
-            self.metrics.log_scalar("Policy/Entropy/Play", self.last_play_stats.entropy, self.total_games)
-            self.metrics.log_scalar("Policy/ClipFraction/Play", self.last_play_stats.clip_fraction, self.total_games)
+            self._log_stats(self.last_play_stats, "Play")
             self.play_buffer.clear()
+
+    def _log_stats(self, s: PPOStats, prefix: str) -> None:
+        """Log all PPO stats to TensorBoard."""
+        step = self.total_games
+
+        # Core PPO metrics
+        self.metrics.log_scalar(f"Loss/Policy/{prefix}", s.policy_loss, step)
+        self.metrics.log_scalar(f"Loss/Value/{prefix}", s.value_loss, step)
+        self.metrics.log_scalar(f"Policy/Entropy/{prefix}", s.entropy, step)
+        self.metrics.log_scalar(f"Policy/ClipFraction/{prefix}", s.clip_fraction, step)
+
+        # Critic health
+        self.metrics.log_scalar(f"Diagnostics/ExplainedVariance/{prefix}", s.explained_variance, step)
+        self.metrics.log_scalar(f"Diagnostics/ValueMAE/{prefix}", s.value_mae, step)
+
+        # Policy stability
+        self.metrics.log_scalar(f"Diagnostics/KL/{prefix}", s.kl_divergence, step)
+        self.metrics.log_scalar(f"Diagnostics/KLMax/{prefix}", s.approx_kl_max, step)
+
+        # Gradient health
+        self.metrics.log_scalar(f"Diagnostics/GradNorm/{prefix}", s.grad_norm, step)
+
+        # Advantage signal quality
+        self.metrics.log_scalar(f"Advantage/Mean/{prefix}", s.advantage_mean, step)
+        self.metrics.log_scalar(f"Advantage/Std/{prefix}", s.advantage_std, step)
+        self.metrics.log_scalar(f"Advantage/Max/{prefix}", s.advantage_max, step)
+
+        # Representation health
+        self.metrics.log_scalar(f"Diagnostics/DeadNeurons/{prefix}", s.dead_neuron_frac, step)
+        self.metrics.log_scalar(f"Diagnostics/EffectiveRank/{prefix}", s.effective_rank, step)
+        self.metrics.log_scalar(f"Diagnostics/ActivationMean/{prefix}", s.activation_mean, step)
+        self.metrics.log_scalar(f"Diagnostics/ActivationStd/{prefix}", s.activation_std, step)
+
+        # Parameter health
+        self.metrics.log_scalar(f"Diagnostics/WeightNorm/{prefix}", s.weight_norm, step)
+        self.metrics.log_scalar(f"Diagnostics/UpdateRatio/{prefix}", s.update_ratio, step)
+
+        # Policy behavior
+        self.metrics.log_scalar(f"Diagnostics/ActionDiversity/{prefix}", s.action_diversity, step)
+
+        # Per-layer grad norms
+        if s.layer_grad_norms:
+            for name, norm in s.layer_grad_norms.items():
+                safe_name = name.replace(".", "/")
+                self.metrics.log_scalar(f"GradNorm/{prefix}/{safe_name}", norm, step)
 
     def _evaluate(self) -> None:
         """Evaluate against heuristic opponents."""
@@ -352,13 +431,26 @@ class Trainer:
             game.reset()
             heuristic = HeuristicAgent()
 
+            # Trick history tracking for LSTM
+            trick_history_list = []
+            current_trick_cards = []
+            current_trick_players = []
+            prev_round = game.round_number
+
             while not game.is_game_over():
                 pid = game.get_current_player()
                 state = game.get_state(pid)
 
+                # Reset trick history on new round
+                if game.round_number != prev_round:
+                    prev_round = game.round_number
+                    trick_history_list = []
+                    current_trick_cards = []
+                    current_trick_players = []
+
                 if game.phase == Phase.BIDDING:
                     if pid == 0:
-                        features = encode_bid_state(state)
+                        features = encode_bid_state_v2(state)
                         mask = get_legal_bid_mask(state)
                         action, _, _, _ = self.bid_net.get_action_and_value(features, mask)
                         game.step_bid(pid, action)
@@ -367,16 +459,36 @@ class Trainer:
 
                 elif game.phase == Phase.PLAYING:
                     if pid == 0:
-                        features = encode_play_state(state)
+                        features = encode_play_state_v2(state)
                         mask = get_legal_play_mask(state)
-                        action, _, _, _ = self.play_net.get_action_and_value(features, mask)
+                        trick_hist = encode_trick_history_v2(trick_history_list, np_)
+                        action, _, _, _ = self.play_net.get_action_and_value(
+                            features, mask, trick_hist)
                         tigress = None
                         if action < len(state.hand) and state.hand[action].special == SpecialType.TIGRESS:
-                            tigress = True
-                        game.step_play(pid, action, tigress)
+                            tigress = state.all_bids[0] > state.all_tricks_won[0]
+                        played_card = state.hand[action] if action < len(state.hand) else state.hand[0]
+                        current_trick_cards.append(played_card.card_id)
+                        current_trick_players.append(pid)
+                        result = game.step_play(pid, action, tigress)
                     else:
                         hi, tig = heuristic.choose_play(state)
-                        game.step_play(pid, hi, tig)
+                        if hi < len(state.hand):
+                            current_trick_cards.append(state.hand[hi].card_id)
+                        current_trick_players.append(pid)
+                        result = game.step_play(pid, hi, tig)
+
+                    # Record completed trick
+                    if result is not None:
+                        winner_idx = result.winner_index
+                        trick_history_list.append({
+                            "card_ids": list(current_trick_cards),
+                            "player_ids": list(current_trick_players),
+                            "winner_id": current_trick_players[winner_idx]
+                                if winner_idx < len(current_trick_players) else 0,
+                        })
+                        current_trick_cards = []
+                        current_trick_players = []
 
             if game.get_winner() == 0:
                 wins += 1

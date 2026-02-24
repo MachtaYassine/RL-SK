@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+import torch
+
 logger = logging.getLogger(__name__)
 
 
@@ -29,6 +31,9 @@ class MetricsLogger:
     def log_scalar(self, tag: str, value: float, step: int) -> None:
         self.writer.add_scalar(tag, value, step)
 
+    def log_histogram(self, tag: str, values: torch.Tensor, step: int) -> None:
+        self.writer.add_histogram(tag, values, step)
+
     def flush(self) -> None:
         self.writer.flush()
 
@@ -39,5 +44,6 @@ class MetricsLogger:
 class _NoOpWriter:
     """Fallback when tensorboard is not installed."""
     def add_scalar(self, *args, **kwargs): pass
+    def add_histogram(self, *args, **kwargs): pass
     def flush(self): pass
     def close(self): pass
