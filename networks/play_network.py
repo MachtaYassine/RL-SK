@@ -59,7 +59,12 @@ class PlayActorCritic(nn.Module):
             nn.ReLU(),
         )
         self.res_blocks = nn.Sequential(*[ResBlock(hidden_dim) for _ in range(3)])
-        self.actor_head = nn.Linear(hidden_dim, MAX_HAND_SIZE)
+
+        # Per-card actor: project context to query, per-card embeddings to keys
+        # logit[i] = dot(query, key[i]) — the network sees which card is at each slot
+        self.actor_query = nn.Linear(hidden_dim, card_emb.embed_dim)
+        self.actor_key = nn.Linear(card_emb.embed_dim, card_emb.embed_dim)
+
         self.critic_head = nn.Linear(hidden_dim, 1)
 
     def _encode_tricks(self, trick_history: dict | None, device: torch.device,
@@ -127,6 +132,10 @@ class PlayActorCritic(nn.Module):
         batch_size = state["scalars"].shape[0]
         device = state["scalars"].device
 
+        # Per-card embeddings for the actor (before pooling)
+        # [batch, MAX_HAND_SIZE, card_embed_dim]
+        per_card_emb = self.card_emb.forward(state["hand_ids"])
+
         hand_emb = self.card_emb.embed_set(state["hand_ids"], state["hand_mask"])
         seen_emb = self.card_emb.embed_set(state["seen_ids"], state["seen_mask"])
         trick_cards_emb = self.card_emb.embed_set(
@@ -140,7 +149,10 @@ class PlayActorCritic(nn.Module):
         h = self.input_proj(x)
         h = self.res_blocks(h)
 
-        logits = self.actor_head(h)
+        # Per-card actor: dot(query, key) for each hand slot
+        query = self.actor_query(h)               # [batch, card_embed_dim]
+        keys = self.actor_key(per_card_emb)        # [batch, MAX_HAND_SIZE, card_embed_dim]
+        logits = (keys * query.unsqueeze(1)).sum(dim=-1)  # [batch, MAX_HAND_SIZE]
         logits = logits + (legal_mask.log().clamp(min=-1e8))
         log_probs = torch.log_softmax(logits, dim=-1)
         value = self.critic_head(h)
