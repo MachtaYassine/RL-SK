@@ -7,12 +7,14 @@ from dataclasses import dataclass
 
 @dataclass
 class PPOConfig:
-    lr: float = 3e-4
+    policy_lr: float = 1e-4
+    value_lr: float = 5e-4
     clip_eps: float = 0.2
     value_coef: float = 0.5
     entropy_coef: float = 0.02
     max_grad_norm: float = 0.5
-    epochs: int = 4
+    policy_epochs: int = 4
+    value_epochs: int = 8
     batch_size: int = 0  # 0 = auto-scale based on GPU memory
     gamma: float = 0.99
     gae_lambda: float = 0.95

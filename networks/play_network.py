@@ -7,6 +7,7 @@ import torch.nn as nn
 
 from networks.card_embedding import CardEmbedding, PlayerEmbedding
 from networks.features import PLAY_SCALAR_DIM, MAX_HAND_SIZE
+from skull_king.cards import NUM_CARDS
 
 
 LSTM_HIDDEN = 64
@@ -28,12 +29,60 @@ class ResBlock(nn.Module):
         return torch.relu(x + self.net(x))
 
 
+class HandSelfAttention(nn.Module):
+    """Multi-head self-attention over cards in hand, conditioned on game context.
+
+    Each card sees every other card + a global context vector (bid progress,
+    tricks remaining, etc.), learning relationships like:
+    - "I'm a high trump and there are 2 others → I'm expendable"
+    - "I'm the only card that can lose this trick → I'm the safe play"
+    """
+
+    def __init__(self, card_dim: int, context_dim: int, num_heads: int = 2):
+        super().__init__()
+        self.num_heads = num_heads
+        # Project card + context into attention space
+        self.card_context_proj = nn.Linear(card_dim + context_dim, card_dim)
+        self.attn = nn.MultiheadAttention(
+            embed_dim=card_dim, num_heads=num_heads, batch_first=True)
+        self.norm = nn.LayerNorm(card_dim)
+
+    def forward(self, per_card_emb: torch.Tensor, context: torch.Tensor,
+                hand_mask: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            per_card_emb: [batch, MAX_HAND_SIZE, card_dim]
+            context: [batch, context_dim] — global game state
+            hand_mask: [batch, MAX_HAND_SIZE] — 1.0 where card exists
+
+        Returns:
+            [batch, MAX_HAND_SIZE, card_dim] — context-aware card representations
+        """
+        # Broadcast context to each card position
+        ctx_expanded = context.unsqueeze(1).expand(-1, per_card_emb.shape[1], -1)
+        card_ctx = torch.cat([per_card_emb, ctx_expanded], dim=-1)
+        card_ctx = self.card_context_proj(card_ctx)
+
+        # Attention mask: True = ignore (PyTorch convention)
+        key_padding_mask = (hand_mask == 0)
+
+        attn_out, _ = self.attn(card_ctx, card_ctx, card_ctx,
+                                key_padding_mask=key_padding_mask)
+        # Residual + norm
+        out = self.norm(per_card_emb + attn_out)
+        return out
+
+
 class PlayActorCritic(nn.Module):
     """Actor-critic for playing phase with learned embeddings.
 
     Input: dict state + dict trick_history
     Actor output: MAX_HAND_SIZE logits (play index 0-9)
     Critic output: scalar value
+
+    Cards in hand go through self-attention conditioned on game context,
+    learning inter-card relationships (e.g. "this card is strong given
+    what else I hold and how many tricks I still need").
     """
 
     def __init__(self, card_emb: CardEmbedding, player_emb: PlayerEmbedding,
@@ -60,12 +109,23 @@ class PlayActorCritic(nn.Module):
         )
         self.res_blocks = nn.Sequential(*[ResBlock(hidden_dim) for _ in range(3)])
 
-        # Per-card actor: project context to query, per-card embeddings to keys
-        # logit[i] = dot(query, key[i]) — the network sees which card is at each slot
+        # Hand self-attention: cards see each other + game context
+        # Context = hidden_dim (backbone output encodes bid, tricks, etc.)
+        self.hand_attn = HandSelfAttention(
+            card_dim=card_emb.embed_dim, context_dim=hidden_dim, num_heads=2)
+
+        # Per-card actor uses context-aware card embeddings
         self.actor_query = nn.Linear(hidden_dim, card_emb.embed_dim)
         self.actor_key = nn.Linear(card_emb.embed_dim, card_emb.embed_dim)
 
         self.critic_head = nn.Linear(hidden_dim, 1)
+
+        # Belief auxiliary head
+        self.belief_head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 2, NUM_CARDS),
+        )
 
     def _encode_tricks(self, trick_history: dict | None, device: torch.device,
                        batch_size: int) -> torch.Tensor:
@@ -116,26 +176,21 @@ class PlayActorCritic(nn.Module):
         _, (h_n, _) = self.trick_lstm(trick_features)
         return h_n.squeeze(0)  # [batch, LSTM_HIDDEN]
 
-    def forward(self, state: dict, legal_mask: torch.Tensor,
-                trick_history: dict | None = None
-                ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Forward pass.
-
-        Args:
-            state: dict with batched tensors from encode_play_state_v2
-            legal_mask: [batch, MAX_HAND_SIZE] binary mask
-            trick_history: dict from encode_trick_history_v2 (batched) or None
+    def _backbone(self, state: dict, legal_mask: torch.Tensor,
+                  trick_history: dict | None = None
+                  ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Shared backbone returning (log_probs, value, hidden).
 
         Returns:
-            (log_probs [batch, MAX_HAND_SIZE], value [batch, 1])
+            (log_probs [batch, MAX_HAND_SIZE], value [batch, 1], h [batch, hidden_dim])
         """
         batch_size = state["scalars"].shape[0]
         device = state["scalars"].device
 
-        # Per-card embeddings for the actor (before pooling)
-        # [batch, MAX_HAND_SIZE, card_embed_dim]
+        # Raw per-card embeddings [batch, MAX_HAND_SIZE, card_embed_dim]
         per_card_emb = self.card_emb.forward(state["hand_ids"])
 
+        # Pooled embeddings for global context
         hand_emb = self.card_emb.embed_set(state["hand_ids"], state["hand_mask"])
         seen_emb = self.card_emb.embed_set(state["seen_ids"], state["seen_mask"])
         trick_cards_emb = self.card_emb.embed_set(
@@ -149,14 +204,45 @@ class PlayActorCritic(nn.Module):
         h = self.input_proj(x)
         h = self.res_blocks(h)
 
-        # Per-card actor: dot(query, key) for each hand slot
-        query = self.actor_query(h)               # [batch, card_embed_dim]
-        keys = self.actor_key(per_card_emb)        # [batch, MAX_HAND_SIZE, card_embed_dim]
-        logits = (keys * query.unsqueeze(1)).sum(dim=-1)  # [batch, MAX_HAND_SIZE]
+        # Hand self-attention: cards attend to each other conditioned on
+        # game context (h encodes bid, tricks won, tricks remaining, etc.)
+        # This lets the network learn card relationships like "this strong
+        # card is expendable because I have others" or "this is my only
+        # way to lose a trick"
+        context_cards = self.hand_attn(per_card_emb, h, state["hand_mask"])
+
+        # Actor: dot(query from context, key from context-aware cards)
+        query = self.actor_query(h)
+        keys = self.actor_key(context_cards)
+        logits = (keys * query.unsqueeze(1)).sum(dim=-1)
         logits = logits + (legal_mask.log().clamp(min=-1e8))
         log_probs = torch.log_softmax(logits, dim=-1)
         value = self.critic_head(h)
+        return log_probs, value, h
+
+    def forward(self, state: dict, legal_mask: torch.Tensor,
+                trick_history: dict | None = None
+                ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Forward pass.
+
+        Returns:
+            (log_probs [batch, MAX_HAND_SIZE], value [batch, 1])
+        """
+        log_probs, value, _ = self._backbone(state, legal_mask, trick_history)
         return log_probs, value
+
+    def forward_with_belief(self, state: dict, legal_mask: torch.Tensor,
+                            trick_history: dict | None = None
+                            ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Forward pass with belief head output.
+
+        Returns:
+            (log_probs [batch, MAX_HAND_SIZE], value [batch, 1],
+             belief_logits [batch, NUM_CARDS])
+        """
+        log_probs, value, h = self._backbone(state, legal_mask, trick_history)
+        belief_logits = self.belief_head(h)
+        return log_probs, value, belief_logits
 
     def get_action_and_value(self, state: dict, legal_mask: torch.Tensor,
                              trick_history: dict | None = None

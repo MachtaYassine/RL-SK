@@ -44,6 +44,8 @@ class PPOStats:
     update_ratio: float = 0.0
     # Policy behavior
     action_diversity: float = 0.0
+    # Belief head
+    belief_loss: float = 0.0
 
 
 def _move_dict_to_device(d: dict, device: torch.device) -> dict:
@@ -58,29 +60,42 @@ class PPO:
         self,
         bid_net: BidActorCritic,
         play_net: PlayActorCritic,
-        lr: float = 3e-4,
+        policy_lr: float = 1e-4,
+        value_lr: float = 5e-4,
         clip_eps: float = 0.2,
         value_coef: float = 0.5,
         entropy_coef: float = 0.02,
         max_grad_norm: float = 0.5,
-        epochs: int = 4,
+        policy_epochs: int = 4,
+        value_epochs: int = 8,
         batch_size: int = 64,
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
+        belief_coef: float = 0.1,
     ):
         self.bid_net = bid_net
         self.play_net = play_net
+        self.belief_coef = belief_coef
         self.clip_eps = clip_eps
         self.value_coef = value_coef
         self.entropy_coef = entropy_coef
         self.max_grad_norm = max_grad_norm
-        self.epochs = epochs
+        self.policy_epochs = policy_epochs
+        self.value_epochs = value_epochs
         self.batch_size = batch_size
         self.gamma = gamma
         self.gae_lambda = gae_lambda
 
-        self.bid_optimizer = torch.optim.Adam(bid_net.parameters(), lr=lr)
-        self.play_optimizer = torch.optim.Adam(play_net.parameters(), lr=lr)
+        # Separate param groups: actor params get policy_lr, critic gets value_lr
+        self.bid_optimizer = torch.optim.Adam([
+            {"params": [p for n, p in bid_net.named_parameters() if "critic" not in n], "lr": policy_lr},
+            {"params": [p for n, p in bid_net.named_parameters() if "critic" in n], "lr": value_lr},
+        ])
+        belief_params = [p for n, p in play_net.named_parameters() if "belief" in n]
+        self.play_optimizer = torch.optim.Adam([
+            {"params": [p for n, p in play_net.named_parameters() if "critic" not in n and "belief" not in n], "lr": policy_lr},
+            {"params": [p for n, p in play_net.named_parameters() if "critic" in n], "lr": value_lr},
+        ] + ([{"params": belief_params, "lr": value_lr}] if belief_params else []))
 
     def update(self, buffer: RolloutBuffer, network: str) -> PPOStats:
         """Run PPO update on a buffer.
@@ -120,7 +135,9 @@ class PPO:
         diag_count = 0
         last_layer_grad_norms = {}
 
-        for _ in range(self.epochs):
+        for epoch_idx in range(self.value_epochs):
+            # Policy updates only run for the first policy_epochs
+            update_policy = epoch_idx < self.policy_epochs
             for batch in buffer.get_batches(advantages, returns, self.batch_size):
                 states = _move_dict_to_device(batch["states"], device)
                 actions = batch["actions"].to(device)
@@ -130,9 +147,17 @@ class PPO:
                 masks = batch["legal_masks"].to(device)
 
                 trick_histories = batch.get("trick_histories")
+                belief_targets = batch.get("belief_targets")
+
+                # Use belief-aware forward for play network
+                belief_logits = None
                 if trick_histories is not None:
                     trick_histories = _move_dict_to_device(trick_histories, device)
-                    log_probs, values = net(states, masks, trick_histories)
+                    if belief_targets is not None and hasattr(net, 'forward_with_belief'):
+                        log_probs, values, belief_logits = net.forward_with_belief(
+                            states, masks, trick_histories)
+                    else:
+                        log_probs, values = net(states, masks, trick_histories)
                 else:
                     log_probs, values = net(states, masks)
                 values = values.squeeze(-1)
@@ -140,20 +165,35 @@ class PPO:
                 # Gather log probs for taken actions
                 action_log_probs = log_probs.gather(1, actions.unsqueeze(1)).squeeze(1)
 
-                # Policy loss (clipped)
-                ratio = (action_log_probs - old_log_probs).exp()
-                surr1 = ratio * adv
-                surr2 = ratio.clamp(1 - self.clip_eps, 1 + self.clip_eps) * adv
-                policy_loss = -torch.min(surr1, surr2).mean()
-
-                # Value loss
+                # Value loss (always computed)
                 value_loss = nn.functional.mse_loss(values, ret)
 
-                # Entropy bonus
-                probs = log_probs.exp()
-                entropy = -(probs * log_probs).sum(dim=-1).mean()
+                if update_policy:
+                    # Policy loss (clipped)
+                    ratio = (action_log_probs - old_log_probs).exp()
+                    surr1 = ratio * adv
+                    surr2 = ratio.clamp(1 - self.clip_eps, 1 + self.clip_eps) * adv
+                    policy_loss = -torch.min(surr1, surr2).mean()
 
-                loss = policy_loss + self.value_coef * value_loss - self.entropy_coef * entropy
+                    # Entropy bonus
+                    probs = log_probs.exp()
+                    entropy = -(probs * log_probs).sum(dim=-1).mean()
+
+                    loss = policy_loss + self.value_coef * value_loss - self.entropy_coef * entropy
+                else:
+                    policy_loss = torch.tensor(0.0)
+                    entropy = torch.tensor(0.0)
+                    ratio = torch.tensor(1.0)
+                    loss = self.value_coef * value_loss
+
+                # Belief auxiliary loss (play network only)
+                belief_loss_val = 0.0
+                if belief_logits is not None and belief_targets is not None:
+                    bt = belief_targets.to(device)
+                    b_loss = nn.functional.binary_cross_entropy_with_logits(
+                        belief_logits, bt)
+                    loss = loss + self.belief_coef * b_loss
+                    belief_loss_val = b_loss.item()
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -162,12 +202,14 @@ class PPO:
 
                 # Track core stats
                 with torch.no_grad():
-                    clip_fraction = ((ratio - 1).abs() > self.clip_eps).float().mean().item()
+                    if update_policy:
+                        clip_fraction = ((ratio - 1).abs() > self.clip_eps).float().mean().item()
+                        stats.policy_loss += policy_loss.item()
+                        stats.entropy += entropy.item()
+                        stats.clip_fraction += clip_fraction
 
-                stats.policy_loss += policy_loss.item()
                 stats.value_loss += value_loss.item()
-                stats.entropy += entropy.item()
-                stats.clip_fraction += clip_fraction
+                stats.belief_loss += belief_loss_val
                 total_updates += 1
 
                 # Diagnostics every 4th batch to minimize overhead
@@ -233,11 +275,14 @@ class PPO:
                             if p.grad is not None:
                                 last_layer_grad_norms[name] = p.grad.norm().item()
 
+        policy_updates = total_updates * self.policy_epochs // self.value_epochs if total_updates > 0 else 1
+        if policy_updates > 0:
+            stats.policy_loss /= policy_updates
+            stats.entropy /= policy_updates
+            stats.clip_fraction /= policy_updates
         if total_updates > 0:
-            stats.policy_loss /= total_updates
             stats.value_loss /= total_updates
-            stats.entropy /= total_updates
-            stats.clip_fraction /= total_updates
+            stats.belief_loss /= total_updates
 
         if diag_count > 0:
             stats.kl_divergence = kl_accum / diag_count

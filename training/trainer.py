@@ -100,12 +100,14 @@ class Trainer:
         # PPO
         self.ppo = PPO(
             self.bid_net, self.play_net,
-            lr=ppo_config.lr,
+            policy_lr=ppo_config.policy_lr,
+            value_lr=ppo_config.value_lr,
             clip_eps=ppo_config.clip_eps,
             value_coef=ppo_config.value_coef,
             entropy_coef=ppo_config.entropy_coef,
             max_grad_norm=ppo_config.max_grad_norm,
-            epochs=ppo_config.epochs,
+            policy_epochs=ppo_config.policy_epochs,
+            value_epochs=ppo_config.value_epochs,
             batch_size=batch_size,
             gamma=ppo_config.gamma,
             gae_lambda=ppo_config.gae_lambda,
@@ -332,7 +334,7 @@ class Trainer:
             self.play_buffer.add(
                 t["state"], t["action"], t["log_prob"],
                 t["value"], t["reward"], t["done"], t["legal_mask"],
-                t.get("trick_history"),
+                t.get("trick_history"), t.get("belief_target"),
             )
 
         for s in result["scores"]:
@@ -408,6 +410,10 @@ class Trainer:
 
         # Policy behavior
         self.metrics.log_scalar(f"Diagnostics/ActionDiversity/{prefix}", s.action_diversity, step)
+
+        # Belief head (play network only)
+        if s.belief_loss > 0:
+            self.metrics.log_scalar(f"Loss/Belief/{prefix}", s.belief_loss, step)
 
         # Per-layer grad norms
         if s.layer_grad_norms:

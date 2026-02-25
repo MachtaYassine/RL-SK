@@ -5,9 +5,11 @@ collects transitions, and returns them to the main process.
 
 Reward shaping:
 - Each bid transition gets the normalized round score for that round.
-- Each play transition gets a small trick reward (+0.1 if trick won helps
-  toward bid, -0.1 if trick won hurts) plus the normalized round score
-  at the end of the round.
+- Each play transition gets a bid-trajectory reward based on whether the
+  trick outcome moved closer to or further from the exact bid target,
+  accounting for tricks remaining (e.g. losing on purpose when at bid is
+  rewarded, overshooting is penalized, becoming mathematically unable to
+  reach bid is heavily penalized). Plus the normalized round score at end.
 - The last transition of the game also gets a game-end bonus based on
   final placement (win=+1, relative score otherwise).
 """
@@ -28,7 +30,7 @@ from networks.features import (
     get_legal_bid_mask, get_legal_play_mask,
     encode_trick_history_v2,
 )
-from skull_king.cards import SpecialType
+from skull_king.cards import SpecialType, NUM_CARDS
 from skull_king.game import SkullKingGame, Phase
 from skull_king.scoring import score_round
 
@@ -169,19 +171,31 @@ def play_games(
                     prev_tricks_won = game.players[0].tricks_won
                     result = game.step_play(pid, action, tigress)
 
-                    # Intermediate trick reward
+                    # Intermediate trick reward: bid-trajectory shaping
+                    # + card economy bonus for efficient card management
                     trick_reward = 0.0
                     if result is not None:
                         new_tricks = game.players[0].tricks_won
+                        tricks_remaining = game.round_number - game.tricks_played_this_round
                         won_trick = new_tricks > prev_tricks_won
-                        if won_trick:
-                            if new_tricks <= player_bid:
-                                trick_reward = 0.1
-                            else:
-                                trick_reward = -0.1
-                        else:
-                            if prev_tricks_won < player_bid:
-                                trick_reward = -0.05
+
+                        # Distance to bid: 0 is perfect
+                        old_distance = abs(prev_tricks_won - player_bid)
+                        new_distance = abs(new_tricks - player_bid)
+                        tricks_needed = player_bid - new_tricks
+                        overshot = new_tricks > player_bid
+
+                        if new_distance < old_distance:
+                            trick_reward = 0.1
+                        elif new_distance > old_distance:
+                            trick_reward = -0.1
+                        elif not overshot and tricks_needed == 0:
+                            trick_reward = 0.05
+                        elif overshot:
+                            trick_reward = -0.1
+                        elif tricks_needed > tricks_remaining:
+                            trick_reward = -0.15
+
 
                         # Record completed trick
                         winner_idx = result.winner_index
@@ -194,10 +208,18 @@ def play_games(
                         current_trick_card_ids = []
                         current_trick_player_ids = []
 
+                    # Belief target: binary vector of cards held by all opponents
+                    belief_target = torch.zeros(NUM_CARDS)
+                    for opp_id in range(np_):
+                        if opp_id != 0:
+                            for card in game.players[opp_id].hand:
+                                belief_target[card.card_id] = 1.0
+
                     round_play_trans.append({
                         "state": features, "action": action, "log_prob": log_prob,
                         "value": value, "reward": trick_reward, "done": False,
                         "legal_mask": mask, "trick_history": trick_hist,
+                        "belief_target": belief_target,
                     })
                 else:
                     if use_heuristic_opp:
@@ -264,6 +286,7 @@ def play_games(
         "scores": scores,
         "wins": wins,
     }
+
 
 
 def _assign_round_rewards(

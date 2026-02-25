@@ -22,7 +22,8 @@ def main():
                          help="Train across 2-8 players each game")
     train_p.add_argument("--min-players", type=int, default=2)
     train_p.add_argument("--max-players", type=int, default=8)
-    train_p.add_argument("--lr", type=float, default=3e-4)
+    train_p.add_argument("--policy-lr", type=float, default=1e-4)
+    train_p.add_argument("--value-lr", type=float, default=5e-4)
     train_p.add_argument("--batch-size", type=int, default=0,
                          help="PPO batch size (0=auto-scale to GPU)")
     train_p.add_argument("--update-interval", type=int, default=0,
@@ -60,7 +61,7 @@ def main():
         from config import PPOConfig, GameConfig, TrainConfig
         from training.trainer import Trainer
 
-        ppo_cfg = PPOConfig(lr=args.lr, batch_size=args.batch_size)
+        ppo_cfg = PPOConfig(policy_lr=args.policy_lr, value_lr=args.value_lr, batch_size=args.batch_size)
         game_cfg = GameConfig(
             num_players=args.players,
             min_players=args.min_players,

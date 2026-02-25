@@ -22,6 +22,7 @@ class Transition:
     done: bool
     legal_mask: torch.Tensor
     trick_history: Optional[Dict[str, torch.Tensor]] = None
+    belief_target: Optional[torch.Tensor] = None
 
 
 class RolloutBuffer:
@@ -32,11 +33,12 @@ class RolloutBuffer:
 
     def add(self, state: Dict[str, torch.Tensor], action: int, log_prob: float,
             value: float, reward: float, done: bool, legal_mask: torch.Tensor,
-            trick_history: Optional[Dict[str, torch.Tensor]] = None) -> None:
+            trick_history: Optional[Dict[str, torch.Tensor]] = None,
+            belief_target: Optional[torch.Tensor] = None) -> None:
         self.transitions.append(Transition(
             state=state, action=action, log_prob=log_prob,
             value=value, reward=reward, done=done, legal_mask=legal_mask,
-            trick_history=trick_history,
+            trick_history=trick_history, belief_target=belief_target,
         ))
 
     def compute_gae(self, gamma: float = 0.99, lam: float = 0.95,
@@ -106,6 +108,10 @@ class RolloutBuffer:
                     trick_histories[k] = torch.stack(
                         [self.transitions[i].trick_history[k] for i in idx])
                 batch["trick_histories"] = trick_histories
+
+            if self.transitions[0].belief_target is not None:
+                batch["belief_targets"] = torch.stack(
+                    [self.transitions[i].belief_target for i in idx])
 
             batches.append(batch)
 
