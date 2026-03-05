@@ -24,6 +24,13 @@ def main():
     train_p.add_argument("--max-players", type=int, default=8)
     train_p.add_argument("--policy-lr", type=float, default=1e-4)
     train_p.add_argument("--value-lr", type=float, default=5e-4)
+    train_p.add_argument("--clip-eps", type=float, default=0.2)
+    train_p.add_argument("--entropy-coef", type=float, default=0.02)
+    train_p.add_argument("--gamma", type=float, default=0.99)
+    train_p.add_argument("--gae-lambda", type=float, default=0.95)
+    train_p.add_argument("--hidden-dim", type=int, default=256)
+    train_p.add_argument("--policy-epochs", type=int, default=4)
+    train_p.add_argument("--value-epochs", type=int, default=8)
     train_p.add_argument("--batch-size", type=int, default=0,
                          help="PPO batch size (0=auto-scale to GPU)")
     train_p.add_argument("--update-interval", type=int, default=0,
@@ -61,7 +68,18 @@ def main():
         from config import PPOConfig, GameConfig, TrainConfig
         from training.trainer import Trainer
 
-        ppo_cfg = PPOConfig(policy_lr=args.policy_lr, value_lr=args.value_lr, batch_size=args.batch_size)
+        ppo_cfg = PPOConfig(
+            policy_lr=args.policy_lr,
+            value_lr=args.value_lr,
+            clip_eps=args.clip_eps,
+            entropy_coef=args.entropy_coef,
+            gamma=args.gamma,
+            gae_lambda=args.gae_lambda,
+            hidden_dim=args.hidden_dim,
+            policy_epochs=args.policy_epochs,
+            value_epochs=args.value_epochs,
+            batch_size=args.batch_size,
+        )
         game_cfg = GameConfig(
             num_players=args.players,
             min_players=args.min_players,

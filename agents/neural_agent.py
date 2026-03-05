@@ -23,10 +23,14 @@ class NeuralAgent(Agent):
     """Agent that uses trained neural networks for decisions."""
 
     def __init__(self, checkpoint_path: str, device: str = "cpu",
-                 hidden_dim: int = 256, card_embed_dim: int = 16,
+                 hidden_dim: int | None = None, card_embed_dim: int = 16,
                  player_embed_dim: int = 4):
         self.device = torch.device(device)
         ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
+
+        # Infer hidden_dim from checkpoint if not specified
+        if hidden_dim is None:
+            hidden_dim = ckpt["bid_net"]["input_proj.0.weight"].shape[0]
 
         card_emb = CardEmbedding(card_embed_dim)
         player_emb = PlayerEmbedding(embed_dim=player_embed_dim)

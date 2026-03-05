@@ -34,6 +34,9 @@ def _card_label(card: Card) -> Tuple[str, str]:
             SpecialType.SKULL_KING: "S.K.",
             SpecialType.TIGRESS: "TIG",
         }
+        if card.special == SpecialType.TIGRESS and card.tigress_as_pirate is not None:
+            mode = "PIR" if card.tigress_as_pirate else "ESC"
+            return "TIG", mode
         return names.get(card.special, "?"), ""
     return "?", ""
 
@@ -129,15 +132,15 @@ class Renderer:
         info_surf = self.font_med.render(info, True, TEXT_COLOR)
         self.screen.blit(info_surf, (20, y + 13))
 
-        # All player bids
+        # All player bids and tricks won
         parts = []
         for i in range(len(all_bids)):
             label = "You" if i == 0 else f"AI{i}"
             b = all_bids[i] if all_bids[i] >= 0 else "?"
             t = all_tricks[i]
-            parts.append(f"{label}:{b}({t})")
-        bids_surf = self.font_tiny.render("  ".join(parts), True, DIM_TEXT_COLOR)
-        self.screen.blit(bids_surf, (WINDOW_WIDTH - bids_surf.get_width() - 20, y + 18))
+            parts.append(f"{label}: {t}/{b}")
+        bids_surf = self.font_small.render("   ".join(parts), True, TEXT_COLOR)
+        self.screen.blit(bids_surf, (WINDOW_WIDTH - bids_surf.get_width() - 20, y + 16))
 
     def draw_hand(
         self,
